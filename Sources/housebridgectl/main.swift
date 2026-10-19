@@ -1,0 +1,245 @@
+import Foundation
+import HouseBridgeCore
+
+// Minimal command-line front end. Configuration lives in a YAML file; this tool runs it and helps with setup.
+
+let paths = Paths.standard()
+let fileLog = FileLog(directory: paths.logsDirectory)
+var args = Array(CommandLine.arguments.dropFirst())
+
+func usage() -> Never {
+    print("""
+    housebridgectl — bridge Lutron Caseta, Philips Hue and UniFi Protect
+
+    USAGE: housebridgectl <command> [options]
+
+    COMMANDS
+      init                 Write a starter config to \(paths.configFile.path)
+      validate             Check the config file and print a summary of its rules
+      run [--dry-run]      Run the bridge (Ctrl-C to stop). --dry-run logs actions instead of changing lights.
+      set-unifi-password   Store the UniFi password in the macOS Keychain (--delete removes it)
+      pair-hue             Pair with the Hue bridge (press its link button first)
+      list lutron|hue|unifi  Show (add --raw to lutron to dump the bridge's raw replies) the devices, buttons, lights, scenes or cameras you can use in rules
+      devices [--brief] [--save]  List every Lutron, Hue and UniFi device: what it reports, what you can do with it, example rules
+      diagnose [--save]    Print a report (config, certificates, live connection tests, recent log) to share when something fails
+      logs [-n N]          Show the last N lines of the log file (default 80) and its location
+      events               Run with every action disabled and print each incoming event (find button/sensor names)
+
+    OPTIONS
+      --config <path>      Use a different config file (default: \(paths.configFile.path))
+    """)
+    exit(2)
+}
+
+func fail(_ message: String) -> Never {
+    fileLog.write(level: .error, category: "cli", message: "\(CommandLine.arguments.dropFirst().joined(separator: " ")): \(message)")
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+    exit(1)
+}
+
+func takeOption(_ name: String) -> String? {
+    guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
+    let value = args[i + 1]
+    args.removeSubrange(i...(i + 1))
+    return value
+}
+
+func takeFlag(_ name: String) -> Bool {
+    guard let i = args.firstIndex(of: name) else { return false }
+    args.remove(at: i)
+    return true
+}
+
+let configURL = takeOption("--config").map { URL(fileURLWithPath: Paths.expand($0)) } ?? paths.configFile
+let dryRun = takeFlag("--dry-run")
+guard let command = args.first else { usage() }
+let rest = Array(args.dropFirst())
+
+func loadConfig() -> Config {
+    do { return try ConfigLoader.load(from: configURL) }
+    catch let e as ConfigError { fail("Config error in \(configURL.path)\n  \(e)") }
+    catch let e as YAMLError { fail("Config error in \(configURL.path)\n  \(e)") }
+    catch { fail("Could not read \(configURL.path): \(error)") }
+}
+
+@Sendable func timestamp(_ d: Date) -> String {
+    let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f.string(from: d)
+}
+
+final class HubBox: @unchecked Sendable { var hub: Hub? }
+
+func runHub(printEventsOnly: Bool) async {
+    let box = HubBox()
+    let dry = dryRun || printEventsOnly
+    @Sendable func launch(_ config: Config) {
+        var config = config
+        if printEventsOnly { config.rules = [] }
+        box.hub?.stop()
+        let hub = Hub(config: config, paths: paths, dryRun: dry,
+                      log: { e in print("\(timestamp(e.date)) [\(e.category)] \(e.message)") },
+                      status: { s, st in print("\(timestamp(Date())) [\(s.rawValue)] \(st.label)") },
+                      onEvent: { e in print("\(timestamp(e.date)) EVENT \(e.summary)") })
+        box.hub = hub
+        hub.start()
+        print("Running with \(config.rules.count) rule(s)\(dry ? " (dry run)" : ""). Ctrl-C to stop.")
+    }
+    launch(loadConfig())
+
+    // Reload live when the YAML changes; a broken edit keeps the previous config running.
+    let watcher = FileWatcher(url: configURL) {
+        do {
+            let config = try ConfigLoader.load(from: configURL)
+            print("\(timestamp(Date())) config changed — reloading")
+            launch(config)
+        } catch {
+            print("\(timestamp(Date())) config changed but is invalid; keeping the previous one:\n  \(error)")
+        }
+    }
+    watcher.start()
+
+    signal(SIGINT, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+    source.setEventHandler { box.hub?.stop(); print("\nStopped."); exit(0) }
+    source.resume()
+    try? await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
+}
+
+switch command {
+case "devices":
+    let config = loadConfig()
+    let result = await Catalog.load(config: config, paths: paths)
+    let text = result.text(includeSnippets: !rest.contains("--brief"))
+    print(text)
+    if rest.contains("--save") {
+        let url = paths.home.appendingPathComponent("devices.txt")
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+        print("\nSaved to \(url.path)")
+    }
+
+case "diagnose":
+    let text = await Diagnostics.report(paths: paths, configURL: configURL, log: fileLog)
+    print(text)
+    if args.contains("--save") || rest.contains("--save") {
+        let name = "diagnostics-\(Int(Date().timeIntervalSince1970)).txt"
+        let url = paths.logsDirectory.appendingPathComponent(name)
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        print("\nSaved to \(url.path)")
+    }
+
+case "logs":
+    var n = 80
+    if let i = rest.firstIndex(of: "-n"), i + 1 < rest.count, let v = Int(rest[i + 1]) { n = v }
+    print("# \(fileLog.url.path)")
+    print(fileLog.tail(lines: n))
+
+case "init":
+    try? paths.ensureExists()
+    if FileManager.default.fileExists(atPath: configURL.path) { fail("\(configURL.path) already exists; not overwriting.") }
+    do {
+        try exampleConfig.write(to: configURL, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+        print("Wrote \(configURL.path). Edit it, then run: housebridgectl validate")
+    } catch { fail("\(error)") }
+
+case "validate":
+    let config = loadConfig()
+    print("OK — \(config.rules.count) rule(s)")
+    if let missing = config.lutron?.missingFiles(), !missing.isEmpty {
+        print("WARNING: Lutron certificate file(s) not readable:")
+        missing.forEach { print("  \($0)") }
+    } else if let l = config.lutron {
+        print("Lutron certificates: \(l.caPath)\n                     \(l.certPath)\n                     \(l.keyPath)")
+    }
+    for r in config.rules {
+        let t = r.trigger
+        print("  • \(r.name): \(t.source.rawValue) \(t.device ?? "*") / \(t.input ?? "*") / \(t.kind) → \(r.actions.count) action(s)\(r.enabled ? "" : "  [disabled]")")
+    }
+
+case "run":
+    await runHub(printEventsOnly: false)
+
+case "events":
+    await runHub(printEventsOnly: true)
+
+case "set-unifi-password":
+    let config = loadConfig()
+    guard let u = config.unifi else { fail("Add a 'unifi:' section (host, username) to \(configURL.path) first.") }
+    if rest.contains("--delete") {
+        do {
+            let removed = try Keychain.deletePassword(host: u.host, username: u.username)
+            print(removed ? "Removed the stored password for \(u.username)@\(u.host)." : "Nothing stored for \(u.username)@\(u.host).")
+        } catch { fail("\(error)") }
+        exit(0)
+    }
+    guard let raw = getpass("UniFi password for \(u.username)@\(u.host) (input hidden): ") else { fail("No input.") }
+    let password = String(cString: raw)
+    guard !password.isEmpty else { fail("Empty password; nothing saved.") }
+    do {
+        try Keychain.savePassword(password, host: u.host, username: u.username)
+        print("Saved to the macOS Keychain. You can remove 'password:' / 'password_env:' from the config.")
+        do {
+            _ = try await ProtectClient(config: u, hosts: KnownHosts(url: paths.knownHostsFile)).discover()
+            print("Verified: logged in to \(u.host) as \(u.username).")
+        } catch { print("Saved, but the login test failed: \(describeError(error))") }
+    } catch { fail("\(describeError(error))") }
+
+case "pair-hue":
+    let config = loadConfig()
+    guard let hue = config.hue else { fail("Add a 'hue:' section with the bridge's IP address to \(configURL.path) first.") }
+    let hosts = KnownHosts(url: paths.knownHostsFile)
+    print("Press the round link button on the Hue bridge at \(hue.host) now… (waiting up to 60s)")
+    fileLog.write(category: "hue", message: "pairing started with \(hue.host)")
+    let deadline = Date().addingTimeInterval(60)
+    while Date() < deadline {
+        do {
+            let creds = try await HueClient.pair(host: hue.host, hosts: hosts)
+            try HueClient.save(creds, to: paths.hueFile)
+            fileLog.write(category: "hue", message: "paired; credentials saved to \(paths.hueFile.path)")
+            print("Paired. Credentials saved to \(paths.hueFile.path)")
+            exit(0)
+        } catch HueError.linkButtonNotPressed {
+            try? await Task.sleep(for: .seconds(2))
+        } catch {
+            fail("Hue pairing failed: \(describeError(error))\nRun 'housebridgectl diagnose' for connection tests.")
+        }
+    }
+    fail("Timed out waiting for the link button.")
+
+case "list":
+    let config = loadConfig()
+    guard let what = rest.first else { usage() }
+    do {
+        switch what {
+        case "lutron":
+            guard let l = config.lutron else { fail("No 'lutron:' section in config.") }
+            let inv = try await LutronBridge.discover(config: l, trace: { print("  [discovery] \($0)") })
+            if rest.contains("--raw") { print(try await LutronBridge.rawDump(config: l)) }
+            print("Remotes / keypads (use the name after 'pico:'):")
+            for d in inv.picos {
+                let buttons = inv.buttons.filter { $0.deviceHref == d.href }.sorted { $0.number < $1.number }
+                    .map { "\(LutronInventory.buttonName(number: $0.number))(\($0.number))" }.joined(separator: ", ")
+                print("  “\(d.fullName)”  [\(d.type) \(d.model)]  buttons: \(buttons)")
+            }
+            print("Wired switches / dimmers (use the name after 'switch:'):")
+            for d in inv.switches { print("  “\(d.fullName)”  [\(d.type) \(d.model)]") }
+        case "hue":
+            guard let h = config.hue, let creds = HueClient.load(from: paths.hueFile), creds.host == h.host else {
+                fail("Hue is not paired yet. Run: housebridgectl pair-hue")
+            }
+            let inv = try await HueClient(credentials: creds, hosts: KnownHosts(url: paths.knownHostsFile)).inventory(refresh: true)
+            print("Lights:");  inv.lights.forEach { print("  “\($0.name)”") }
+            print("Rooms:");   inv.rooms.forEach { print("  “\($0.name)”") }
+            print("Zones:");   inv.zones.forEach { print("  “\($0.name)”") }
+            print("Scenes (room: scene):"); inv.scenes.forEach { print("  “\($0.groupName ?? "?")”: “\($0.name)”") }
+        case "unifi":
+            guard let u = config.unifi else { fail("No 'unifi:' section in config.") }
+            let inv = try await ProtectClient(config: u, hosts: KnownHosts(url: paths.knownHostsFile)).discover()
+            for item in inv.items { print("  \(item.kind): “\(item.name)”  [\(item.model)]") }
+        default: usage()
+        }
+    } catch { fail("list \(what) failed: \(describeError(error))\nRun 'housebridgectl diagnose' for connection tests.") }
+
+default:
+    usage()
+}

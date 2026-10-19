@@ -1,0 +1,96 @@
+# HouseBridge configuration. Edit this file; the menu bar app reloads it when it changes.
+# Check it with:  housebridgectl validate
+
+lutron:
+  host: 192.168.1.20                      # Caseta Smart Bridge IP (find it in the Lutron app or your router)
+  # PEM files from Lutron pairing. Either point at one folder (files are recognised by name:
+  # *-ca.pem, *-cert.pem, *-key.pem as saved by Home Assistant) ...
+  certs_dir: ~/.config/housebridge/lutron
+  # ... or name each file explicitly (these override certs_dir). Relative paths are resolved
+  # against the folder that contains this config file.
+  # ca:   /path/to/lutron_caseta-XXXX-ca.pem
+  # cert: /path/to/lutron_caseta-XXXX-cert.pem
+  # key:  /path/to/lutron_caseta-XXXX-key.pem
+
+hue:
+  host: 192.168.1.21                      # Hue bridge IP; then run: housebridgectl pair-hue
+
+unifi:
+  host: 192.168.1.1                        # UniFi OS console IP
+  username: housebridge                    # a *local* account, not your Ubiquiti SSO login
+  # Password lookup order: 'password:' here, then the env var named by 'password_env:', then the macOS Keychain.
+  # Recommended: leave both out and run:  housebridgectl set-unifi-password
+  # password_env: UNIFI_PASSWORD
+  clear_after_seconds: 45                 # how long after motion stops before a 'clear' event
+
+timing:
+  double_tap_ms: 300
+  hold_ms: 500
+
+# Find names with:  housebridgectl list lutron | hue | unifi
+# Watch live events with:  housebridgectl events
+rules:
+  # ---- 5-button Pico: on / favorite (middle) / off / raise / lower ----
+  # Replace "Family Room Pico" with the exact name from:  housebridgectl list lutron
+  # and "Family Room" with the Hue room name from:       housebridgectl list hue
+  - name: Family room - on
+    when: { pico: Family Room Pico, button: on, gesture: tap }
+    then:
+      - action: light
+        room: Family Room
+        on: true
+
+  - name: Family room - off
+    when: { pico: Family Room Pico, button: off, gesture: tap }
+    then:
+      - action: light
+        room: Family Room
+        on: false
+
+  - name: Family room - next scene
+    when: { pico: Family Room Pico, button: raise, gesture: tap }
+    then:
+      - action: cycle_scenes
+        room: Family Room
+        direction: next
+        # scenes: [Read, Relax, Energize]   # optional: fixes the order; default is every scene in the room, A-Z
+
+  - name: Family room - previous scene
+    when: { pico: Family Room Pico, button: lower, gesture: tap }
+    then:
+      - action: cycle_scenes
+        room: Family Room
+        direction: previous
+
+  - name: Family room - reset to neutral white (middle button)
+    when: { pico: Family Room Pico, button: favorite, gesture: tap }
+    then:
+      - action: light
+        room: Family Room
+        on: true
+        brightness: 100
+        color_temp_kelvin: 3655
+
+  - name: Front porch on when a person is seen
+    when:
+      unifi: Front Camera
+      event: person
+      state: start
+    between: ["18:00", "06:00"]
+    cooldown_seconds: 30
+    then:
+      - action: light
+        room: Front Porch
+        on: true
+        brightness: 100
+
+  - name: Front porch off after things go quiet
+    when:
+      unifi: Front Camera
+      event: person
+      state: clear
+    then:
+      - action: light
+        room: Front Porch
+        on: false
+        transition_ms: 4000
