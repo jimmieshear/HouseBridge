@@ -1,0 +1,19 @@
+import Foundation
+
+extension SRP {
+    /// RFC 5054 appendix A 3072-bit group (the RFC 3526 group 15 safe prime); generator is 5.
+    static let primeHex = """
+        ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74
+        020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f1437
+        4fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7ed
+        ee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf05
+        98da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb
+        9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3b
+        e39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf695581718
+        3995497cea956ae515d2261898fa051015728e5a8aaac42dad33170d04507a33
+        a85521abdf1cba64ecfb850458dbef0a8aea71575d060c7db3970f85a6e1e4c7
+        abf5ae8cdb0933d71e8c94e04a25619dcee3d2261ad2ee6bf12ffa06d98a0864
+        d87602733ec86a64521f2b18177b200cbbe117577a615d6c770988c0bad946e2
+        08e24fa074e5ab3143db5bfce0fd108e4b82d120a93ad2caffffffffffffffff
+"""
+}

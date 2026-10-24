@@ -22,9 +22,11 @@ public struct TriggerEvent: Sendable {
     public var kind: String
     public var detail: String?
     public var date: Date
+    /// The source system's id for the device (UniFi Protect id), when it has one.
+    public var deviceID: String?
 
     public init(source: Source, device: String, deviceAliases: [String] = [], input: String,
-                inputAliases: [String] = [], kind: String, detail: String? = nil, date: Date = Date()) {
+                inputAliases: [String] = [], kind: String, detail: String? = nil, date: Date = Date(), deviceID: String? = nil) {
         self.source = source
         self.device = device
         self.deviceAliases = deviceAliases
@@ -33,6 +35,7 @@ public struct TriggerEvent: Sendable {
         self.kind = kind
         self.detail = detail
         self.date = date
+        self.deviceID = deviceID
     }
 
     public func with(kind: String) -> TriggerEvent {
@@ -67,7 +70,7 @@ public struct LogEntry: Sendable, Identifiable {
     }
 }
 
-public enum Subsystem: String, Sendable, CaseIterable { case lutron, hue, unifi }
+public enum Subsystem: String, Sendable, CaseIterable { case lutron, hue, unifi, homekit }
 
 public enum ConnectionStatus: Sendable, Equatable {
     case notConfigured

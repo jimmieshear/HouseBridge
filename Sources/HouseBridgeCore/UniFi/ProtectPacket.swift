@@ -62,7 +62,7 @@ enum ProtectPacket {
 /// later "update" messages (which only carry the changed fields, e.g. `end`) can be tied back to the camera and type.
 /// Sensors: field changes (`isOpened`, `isMotionDetected`, `leakDetectedAt`, ...).
 final class ProtectInterpreter {
-    struct Device { var name: String; var kind: String }
+    struct Device { var id: String; var name: String; var kind: String }
     private struct TrackedEvent {
         var cameraId: String
         var startedInputs: Set<String> = []
@@ -85,7 +85,7 @@ final class ProtectInterpreter {
     }
 
     private func event(_ device: Device, input: String, kind: String, detail: String? = nil) -> TriggerEvent {
-        TriggerEvent(source: .unifi, device: device.name, deviceAliases: [], input: input, inputAliases: [], kind: kind, detail: detail)
+        TriggerEvent(source: .unifi, device: device.name, deviceAliases: [], input: input, inputAliases: [], kind: kind, detail: detail, deviceID: device.id)
     }
 
     private func interpretEvent(action: String, id: String, data: JSON) -> [TriggerEvent] {

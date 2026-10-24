@@ -41,7 +41,7 @@ public final class HueActions: ActionExecutor, @unchecked Sendable {
                 "brightness_delta": abs(delta),
             ]]
             for (type, id) in try await resolve(target) { try await put(type, id, body) }
-        case .wait, .log:
+        case .wait, .log, .lutron:
             break
         }
     }

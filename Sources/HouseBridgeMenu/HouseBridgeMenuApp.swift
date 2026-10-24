@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import HouseBridgeCore
+import CoreImage.CIFilterBuiltins
 
 /// Menu bar front end. All behaviour comes from ~/.config/housebridge/config.yaml; this just shows status
 /// and recent activity, and reloads the file whenever it changes.
@@ -10,6 +11,8 @@ final class AppModel: ObservableObject {
     @Published var activity: [LogEntry] = []
     @Published var configError: String?
     @Published var ruleCount = 0
+    /// Setup code and pairing state for the HomeKit bridge, when one is configured.
+    @Published var homeKit: HomeKitPairingInfo?
 
     @Published var catalog: CatalogResult?
     @Published var catalogLoading = false
@@ -80,7 +83,12 @@ final class AppModel: ObservableObject {
             configError = nil
             let hub = Hub(config: config, paths: paths,
                           log: { [weak self] e in Task { @MainActor in self?.append(e) } },
-                          status: { [weak self] s, st in Task { @MainActor in self?.statuses[s] = st } },
+                          status: { [weak self] s, st in
+                              Task { @MainActor in
+                                  self?.statuses[s] = st
+                                  if s == .homekit { self?.refreshHomeKit() }
+                              }
+                          },
                           onEvent: { [weak self] e in
                               Task { @MainActor in self?.append(LogEntry(category: "event", message: e.summary)) }
                           })
@@ -92,6 +100,10 @@ final class AppModel: ObservableObject {
             configError = "\(error)"
             append(LogEntry(level: .error, category: "config", message: "\(error)"))
         }
+    }
+
+    private func refreshHomeKit() {
+        homeKit = currentConfig?.homekit == nil ? nil : HomeKitBridge.pairingInfo(paths: paths)
     }
 
     private func append(_ entry: LogEntry) {
@@ -141,11 +153,23 @@ struct MenuContent: View {
                     let status = model.statuses[sub] ?? .notConfigured
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Circle().fill(color(for: status)).frame(width: 8, height: 8)
-                        Text(sub.rawValue.capitalized).frame(width: 52, alignment: .leading)
+                        Text(sub == .homekit ? "HomeKit" : sub.rawValue.capitalized).frame(width: 64, alignment: .leading)
                         Text(status.label).foregroundStyle(.secondary).lineLimit(3)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .font(.callout)
+                }
+            }
+
+            if let info = model.homeKit, !info.isPaired {
+                HStack(spacing: 10) {
+                    if let qr = Self.qrImage(info.setupURI) { Image(nsImage: qr).interpolation(.none).resizable().frame(width: 96, height: 96) }
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Add to Home.app").font(.subheadline)
+                        Text(info.setupCode).font(.system(.title3, design: .monospaced)).textSelection(.enabled)
+                        Text("Scan the code, or choose More options and type it in.").font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 
@@ -192,6 +216,17 @@ struct MenuContent: View {
         }
         .padding(12)
         .frame(width: 420)
+    }
+
+    private static func qrImage(_ text: String) -> NSImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(text.utf8)
+        filter.correctionLevel = "M"
+        guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)) else { return nil }
+        let rep = NSCIImageRep(ciImage: output)
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+        return image
     }
 
     private func color(for status: ConnectionStatus) -> Color {

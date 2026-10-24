@@ -9,6 +9,8 @@ public struct ProtectInventory: Sendable {
         /// Event inputs this device can raise (e.g. motion, person, contact).
         public var provides: [String] = []
         public var details: [String] = []
+        /// Current state at the time of the bootstrap: contact (true = open), motion, leak (true = detected).
+        public var state: [String: Bool] = [:]
     }
     public var items: [Item] = []
 }
@@ -18,16 +20,19 @@ public final class ProtectClient: @unchecked Sendable {
     private let config: UnifiConfig
     private let hosts: KnownHosts
     private let emit: @Sendable (TriggerEvent) -> Void
+    private let onInventory: @Sendable (ProtectInventory) -> Void
     private let status: @Sendable (ConnectionStatus) -> Void
     private let log: @Sendable (LogEntry) -> Void
 
     public init(config: UnifiConfig, hosts: KnownHosts,
                 emit: @escaping @Sendable (TriggerEvent) -> Void = { _ in },
+                onInventory: @escaping @Sendable (ProtectInventory) -> Void = { _ in },
                 status: @escaping @Sendable (ConnectionStatus) -> Void = { _ in },
                 log: @escaping @Sendable (LogEntry) -> Void = { _ in }) {
         self.config = config
         self.hosts = hosts
         self.emit = emit
+        self.onInventory = onInventory
         self.status = status
         self.log = log
     }
@@ -80,6 +85,7 @@ public final class ProtectClient: @unchecked Sendable {
                     if flags?["hasSpeaker"] as? Bool == true { item.details.append("has speaker") }
                     if (flags?["smartDetectAudioTypes"] as? [String])?.isEmpty == false { item.details.append("audio detection: " + (flags?["smartDetectAudioTypes"] as? [String] ?? []).joined(separator: ", ")) }
                     if let state = d["state"] as? String { item.details.append("state: \(state)") }
+                    if let moving = d["isMotionDetected"] as? Bool { item.state["motion"] = moving }
                 } else {
                     let mount = d["mountType"] as? String ?? "unknown"
                     item.details.append("mount: \(mount)")
@@ -89,6 +95,9 @@ public final class ProtectClient: @unchecked Sendable {
                     default: item.provides = ["contact", "motion", "leak"]
                     }
                     item.provides += ["tamper", "alarm"]
+                    item.state["contact"] = d["isOpened"] as? Bool ?? false
+                    item.state["motion"] = d["isMotionDetected"] as? Bool ?? false
+                    item.state["leak"] = (d["leakDetectedAt"] != nil && !(d["leakDetectedAt"] is NSNull)) || (d["externalLeakDetectedAt"] != nil && !(d["externalLeakDetectedAt"] is NSNull))
                 }
                 items.append(item)
             }
@@ -178,7 +187,8 @@ public final class ProtectClient: @unchecked Sendable {
         let boot = try await authenticatedBootstrap(session)
 
         let interpreter = ProtectInterpreter()
-        for item in boot.items { interpreter.devices[item.id] = .init(name: item.name, kind: item.kind) }
+        for item in boot.items { interpreter.devices[item.id] = .init(id: item.id, name: item.name, kind: item.kind) }
+        onInventory(ProtectInventory(items: boot.items))
 
         var components = URLComponents()
         components.scheme = "wss"

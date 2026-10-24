@@ -89,6 +89,16 @@ public enum Diagnostics {
             }
         }
 
+        if let hk = config?.homekit {
+            section("HomeKit bridge (\(hk.name))")
+            if let info = HomeKitBridge.pairingInfo(paths: paths) {
+                out.append("device id: \(info.deviceID); accessories published: \(info.accessoryCount)")
+                out.append(info.isPaired ? "paired controllers: \(info.controllers.count)" : "not paired yet (setup code is in `housebridgectl homekit`)")
+            } else {
+                out.append("no saved identity yet (created on first run)")
+            }
+        }
+
         section("Recent log (last 80 lines)")
         out.append(log.tail(lines: 80))
         return out.joined(separator: "\n")
@@ -104,7 +114,7 @@ public enum Diagnostics {
     /// Masks anything that looks like a secret in the config text.
     static func sanitize(_ text: String) -> String {
         // Works for block style (`password: x`) and inline maps (`{ password: x, host: y }`).
-        text.replacingOccurrences(of: #"(?<![A-Za-z_])(password|appKey|app_key|token):[ \t]*[^,}\n]+"#,
+        text.replacingOccurrences(of: #"(?<![A-Za-z_])(password|appKey|app_key|token|setup_code):[ \t]*[^,}\n]+"#,
                                   with: "$1: ********", options: .regularExpression)
     }
 

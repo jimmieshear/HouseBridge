@@ -6,6 +6,7 @@ public struct Config: Sendable {
     public var lutron: LutronConfig?
     public var hue: HueConfig?
     public var unifi: UnifiConfig?
+    public var homekit: HomeKitConfig?
     public var timing = Timing()
     public var rules: [Rule] = []
     public init() {}
@@ -121,6 +122,8 @@ public enum Action: Sendable {
     /// Steps through a room's/zone's scenes. `scenes` fixes the order; empty means every scene in the group, sorted by name.
     case cycleScenes(room: String?, zone: String?, scenes: [String], step: Int)
     case dim(HueTarget, delta: Double, repeatWhileHeld: Bool, intervalMs: Int)
+    /// Switches a Lutron switch/dimmer. `offAfterSeconds` (with `on: true`) schedules an off; a new `lutron` action for the same device restarts it.
+    case lutron(device: String, on: Bool, offAfterSeconds: Double?)
     case wait(ms: Int)
     case log(String)
 }
@@ -146,7 +149,7 @@ public enum ConfigLoader {
         let root = try YAML.parse(text)
         guard case .map(let top) = root else { throw ConfigError(path: "", message: "top level must be a map") }
         let r = Reader(map: top, path: "")
-        try r.rejectUnknown(["lutron", "hue", "unifi", "timing", "rules"])
+        try r.rejectUnknown(["lutron", "hue", "unifi", "homekit", "timing", "rules"])
 
         var config = Config()
         if let l = try r.reader("lutron") {
@@ -175,6 +178,26 @@ public enum ConfigLoader {
             cfg.passwordEnv = try u.string("password_env")
             cfg.clearAfterSeconds = try u.double("clear_after_seconds") ?? 30
             config.unifi = cfg
+        }
+        if let h = try r.reader("homekit") {
+            try h.rejectUnknown(["name", "port", "setup_code", "smart_detections"])
+            var cfg = HomeKitConfig()
+            if let name = try h.string("name") {
+                guard !name.isEmpty, name.count <= 64 else { throw ConfigError(path: h.path + ".name", message: "must be 1-64 characters") }
+                cfg.name = name
+            }
+            if let port = try h.int("port") {
+                guard (1024...65535).contains(port) else { throw ConfigError(path: h.path + ".port", message: "must be between 1024 and 65535") }
+                cfg.port = port
+            }
+            if let code = try h.string("setup_code") {
+                guard HAPStore.isValidSetupCode(code) else {
+                    throw ConfigError(path: h.path + ".setup_code", message: "must look like 031-45-154 (8 digits; HomeKit rejects easy ones such as 123-45-678 or 111-11-111)")
+                }
+                cfg.setupCode = code
+            }
+            cfg.smartDetections = try h.bool("smart_detections") ?? false
+            config.homekit = cfg
         }
         if let t = try r.reader("timing") {
             try t.rejectUnknown(["double_tap_ms", "hold_ms"])
@@ -229,6 +252,9 @@ public enum ConfigLoader {
     }
 
     private static func validate(_ config: Config) throws {
+        if config.homekit != nil && config.unifi == nil {
+            throw ConfigError(path: "homekit", message: "publishes UniFi Protect devices to Home.app, so it needs a 'unifi:' section")
+        }
         for rule in config.rules {
             switch rule.trigger.source {
             case .pico, .lutronSwitch:
@@ -236,7 +262,13 @@ public enum ConfigLoader {
             case .unifi:
                 if config.unifi == nil { throw ConfigError(path: "rules", message: "rule '\(rule.name)' uses UniFi but there is no 'unifi:' section") }
             }
-            let usesHue = rule.actions.contains { if case .wait = $0 { false } else if case .log = $0 { false } else { true } }
+            let usesHue = rule.actions.contains {
+                switch $0 { case .wait, .log, .lutron: false; default: true }
+            }
+            let usesLutronOutput = rule.actions.contains { if case .lutron = $0 { true } else { false } }
+            if usesLutronOutput && config.lutron == nil {
+                throw ConfigError(path: "rules", message: "rule '\(rule.name)' controls a Lutron switch but there is no 'lutron:' section")
+            }
             if usesHue && config.hue == nil {
                 throw ConfigError(path: "rules", message: "rule '\(rule.name)' controls Hue but there is no 'hue:' section")
             }
@@ -361,6 +393,15 @@ public enum ConfigLoader {
             return .dim(target, delta: direction == "up" ? step : -step,
                         repeatWhileHeld: try r.bool("repeat_while_held") ?? false,
                         intervalMs: try r.int("interval_ms") ?? 400)
+        case "lutron":
+            try r.rejectUnknown(["action", "switch", "on", "off_after_seconds"])
+            let off = try r.double("off_after_seconds")
+            let on = try r.bool("on") ?? true
+            if let off {
+                guard off > 0 else { throw ConfigError(path: r.path + ".off_after_seconds", message: "must be greater than 0") }
+                guard on else { throw ConfigError(path: r.path + ".off_after_seconds", message: "only makes sense with 'on: true'") }
+            }
+            return .lutron(device: try r.requireString("switch"), on: on, offAfterSeconds: off)
         case "wait":
             try r.rejectUnknown(["action", "ms", "seconds"])
             if let s = try r.double("seconds") { return .wait(ms: Int(s * 1000)) }
@@ -369,7 +410,7 @@ public enum ConfigLoader {
             try r.rejectUnknown(["action", "message"])
             return .log(try r.requireString("message"))
         default:
-            throw ConfigError(path: r.path + ".action", message: "unknown action '\(kind)' (expected light, toggle, scene, cycle_scenes, dim, wait, log)")
+            throw ConfigError(path: r.path + ".action", message: "unknown action '\(kind)' (expected light, toggle, scene, cycle_scenes, dim, lutron, wait, log)")
         }
     }
 

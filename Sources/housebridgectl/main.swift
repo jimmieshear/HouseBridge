@@ -19,6 +19,10 @@ func usage() -> Never {
       run [--dry-run]      Run the bridge (Ctrl-C to stop). --dry-run logs actions instead of changing lights.
       set-unifi-password   Store the UniFi password in the macOS Keychain (--delete removes it)
       pair-hue             Pair with the Hue bridge (press its link button first)
+      import-homebridge    Read a running Homebridge's config (found over Bonjour and its web UI, or --from-file) and add it to your HouseBridge config
+                           (appends the missing unifi:/homekit: sections to an existing config, never overwrites; creates one if absent)
+                           [--from-file <config.json>] [--ui <http://host:8581>] [--ui-user <name>] [--out <file>] [--print] [--store-password]
+      homekit [--reset]    Show the code for adding HouseBridge to Home.app and who is paired (--reset forgets everything)
       list lutron|hue|unifi  Show (add --raw to lutron to dump the bridge's raw replies) the devices, buttons, lights, scenes or cameras you can use in rules
       devices [--brief] [--save]  List every Lutron, Hue and UniFi device: what it reports, what you can do with it, example rules
       diagnose [--save]    Print a report (config, certificates, live connection tests, recent log) to share when something fails
@@ -183,6 +187,133 @@ case "set-unifi-password":
             print("Verified: logged in to \(u.host) as \(u.username).")
         } catch { print("Saved, but the login test failed: \(describeError(error))") }
     } catch { fail("\(describeError(error))") }
+
+case "import-homebridge":
+    func note(_ text: String) { FileHandle.standardError.write(Data((text + "\n").utf8)) }
+    func ask(_ prompt: String) -> String {
+        FileHandle.standardError.write(Data(prompt.utf8))
+        return readLine() ?? ""
+    }
+    let fromFile = takeOption("--from-file")
+    let uiOption = takeOption("--ui")
+    let uiUser = takeOption("--ui-user")
+    let outPath = takeOption("--out")
+    let printOnly = takeFlag("--print")
+    let storePassword = takeFlag("--store-password")
+
+    var configData: Data
+    var source: String
+    var accessoryNames: [String] = []
+    if let fromFile {
+        guard let d = FileManager.default.contents(atPath: Paths.expand(fromFile)) else { fail("Could not read \(fromFile)") }
+        configData = d
+        source = fromFile
+    } else {
+        let hosts = KnownHosts(url: paths.knownHostsFile)
+        var base: URL?
+        if let uiOption {
+            base = URL(string: uiOption.contains("://") ? uiOption : "http://\(uiOption)")
+        } else {
+            note("Looking for HomeKit bridges on the network (4s)…")
+            let found = await BonjourDiscovery.findBridges()
+            if found.isEmpty { note("  none found. If this Mac has no Local Network permission, allow it in System Settings → Privacy & Security.") }
+            for b in found {
+                note("  “\(b.name)”  \(b.host ?? "?"):\(b.port.map(String.init) ?? "?")  \(b.paired ? "paired" : "not paired")")
+            }
+            var candidates: [URL] = []
+            var seen = Set<String>()
+            for b in found {
+                guard let host = b.host, seen.insert(host).inserted else { continue }
+                for scheme in ["http", "https"] {
+                    let url = URL(string: "\(scheme)://\(host):8581")!
+                    if await HomebridgeUIClient(baseURL: url, hosts: hosts).requiresLogin() != nil { candidates.append(url); break }
+                }
+            }
+            switch candidates.count {
+            case 1:
+                base = candidates[0]
+                note("Homebridge UI found at \(candidates[0].absoluteString)")
+            case 0:
+                fail("No Homebridge web UI answered on port 8581 of those hosts. Give its address with --ui http://<vm-address>:8581, or copy its config.json and use --from-file.")
+            default:
+                fail("Several Homebridge UIs answered: " + candidates.map(\.absoluteString).joined(separator: ", ") + ". Pick one with --ui.")
+            }
+        }
+        guard let base else { fail("Could not understand the --ui address.") }
+        let client = HomebridgeUIClient(baseURL: base, hosts: hosts)
+        guard let needsLogin = await client.requiresLogin(timeout: 10) else {
+            fail("\(base.absoluteString) did not answer like the Homebridge UI (expected GET /api/auth/settings).")
+        }
+        var user = uiUser
+        var password: String?
+        if needsLogin {
+            if user == nil { user = ask("Homebridge UI username: ") }
+            guard let raw = getpass("Homebridge UI password for \(user ?? "") (input hidden): ") else { fail("No input.") }
+            password = String(cString: raw)
+        }
+        do {
+            do { try await client.authenticate(username: user, password: password) }
+            catch is HomebridgeUIClient.OTPRequired {
+                try await client.authenticate(username: user, password: password, otp: ask("Homebridge UI one-time code: "))
+            }
+            configData = try await client.fetchConfig()
+        } catch { fail("Could not read the config from \(base.absoluteString): \(describeError(error))") }
+        accessoryNames = await client.fetchAccessoryNames()
+        source = base.absoluteString
+    }
+
+    let imported: HomebridgeImport
+    do { imported = try HomebridgeImport.parse(configData) } catch { fail("\(error)") }
+    note(imported.report(source: source, accessories: accessoryNames))
+
+    if printOnly {
+        note("\n--- generated config (nothing was written) ---")
+        print(imported.yaml(source: source))
+    } else {
+        let target = outPath.map { URL(fileURLWithPath: Paths.expand($0)) } ?? configURL
+        do {
+            let outcome = try ConfigAppend.apply(imported, source: source, to: target)
+            switch outcome.action {
+            case .created:
+                note("\nNo config existed, so created \(target.path) (unifi + homekit).")
+            case .appended:
+                note("\nAppended \(outcome.added.joined(separator: " + ")) to \(target.path); everything already in it is unchanged.")
+                if !outcome.skipped.isEmpty { note("Left your existing \(outcome.skipped.joined(separator: " and ")) section as it was.") }
+                if let backup = outcome.backup { note("Backup of the original: \(backup.path)") }
+            case .nothingToDo:
+                note("\n\(target.path) already has \(outcome.skipped.joined(separator: " and ")); nothing to add, nothing changed.")
+            }
+            if outcome.action != .nothingToDo { note("Checked: the result parses and validates.") }
+        } catch { fail("\(error)") }
+    }
+
+    let controller = imported.primary
+    if storePassword, let secret = controller.password {
+        do {
+            try Keychain.savePassword(secret, host: controller.host, username: controller.username)
+            note("Stored the UniFi password in the macOS Keychain for \(controller.username)@\(controller.host).")
+        } catch { note("Could not store the password: \(describeError(error))") }
+    } else if controller.password != nil {
+        note("Next: store the UniFi password with `housebridgectl set-unifi-password` (or rerun with --store-password).")
+    } else {
+        note("Next: store the UniFi password with `housebridgectl set-unifi-password`.")
+    }
+    note("Then: `housebridgectl validate`, `housebridgectl homekit` for the Home.app setup code, and start HouseBridge.")
+
+case "homekit":
+    if rest.contains("--reset") {
+        guard HomeKitBridge.reset(paths: paths) else { fail("HouseBridge is running and owns the HomeKit bridge. Quit it first, then retry.") }
+        print("Forgot the HomeKit identity and all pairings. In Home.app, remove the old “HouseBridge” bridge, then run again to get a new code.")
+        exit(0)
+    }
+    let config = loadConfig()
+    guard let hk = config.homekit else { fail("Add a 'homekit:' section to \(configURL.path) first (see README).") }
+    guard let info = HomeKitBridge.pairingInfo(paths: paths, setupCode: hk.setupCode, create: true) else { fail("Could not read \(paths.homeKitFile.path)") }
+    print("HomeKit bridge “\(hk.name)”  (id \(info.deviceID))")
+    print("  Setup code:  \(info.setupCode)")
+    print("  Setup URI:   \(info.setupURI)   (the content of the QR code; the menu bar app shows it as a QR image)")
+    print(info.isPaired ? "  Paired with \(info.controllers.count) controller(s)." : "  Not paired yet: start HouseBridge, then in Home.app choose Add Accessory → More options and enter the code.")
+    print("  Accessories: \(info.accessoryCount) (filled in once HouseBridge has connected to UniFi Protect)")
 
 case "pair-hue":
     let config = loadConfig()

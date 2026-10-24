@@ -26,6 +26,14 @@ unifi:
   # password_env: UNIFI_PASSWORD
   clear_after_seconds: 45                 # how long after motion stops before a 'clear' event
 
+# Publish the UniFi Protect cameras and sensors to Apple Home (motion, contact, leak, doorbell), replacing
+# Homebridge's UniFi Protect plugin for those. No video. Uncomment, then run:  housebridgectl homekit
+# homekit:
+#   name: HouseBridge                     # how the bridge appears in Home.app
+#   # setup_code: 031-45-154              # optional; otherwise one is generated and remembered
+#   # port: 51826                         # optional; default lets the system choose
+#   # smart_detections: true              # also a motion sensor each for person, vehicle, animal, ...
+
 timing:
   double_tap_ms: 300
   hold_ms: 500

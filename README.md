@@ -1,6 +1,6 @@
 # HouseBridge
 
-A native macOS menu bar app and CLI that turns Lutron Caseta Pico remotes and switches and UniFi Protect cameras and sensors into triggers for Philips Hue lights, scenes, and rooms. It has no VM and no third-party packages. All behavior lives in one YAML file.
+A native macOS menu bar app and CLI that turns Lutron Caseta Pico remotes and switches and UniFi Protect cameras and sensors into triggers for Philips Hue lights, scenes, and rooms. It can also publish the Protect motion, contact, leak and doorbell sensors to Apple Home as a HomeKit bridge, so it can replace Homebridge for that. It has no VM and no third-party packages. All behavior lives in one YAML file.
 
 ```yaml
 rules:
@@ -36,8 +36,9 @@ Run `swift test --disable-sandbox` for the unit tests.
 2. **Hue:** `housebridgectl pair-hue`, then press the bridge's link button.
 3. **Lutron:** put the three PEM files from LEAP pairing (CA, cert, key) in `lutron.certs_dir`, or name them with `ca:`, `cert:`, and `key:`.
 4. **UniFi:** create a *local* user, set `unifi.username`, then run `housebridgectl set-unifi-password`. The password is stored in the macOS Keychain.
-5. `housebridgectl list lutron|hue|unifi` shows the exact device names to use in rules.
-6. `housebridgectl validate`, then `housebridgectl run --dry-run`, then `housebridgectl run`. The menu bar app reloads the config live.
+5. **HomeKit (optional):** add a `homekit:` section (see `config.yaml`), run `housebridgectl homekit` for the setup code, start HouseBridge, then in Home.app choose Add Accessory → More options and enter the code (the menu bar app also shows a QR code). Cameras and sensors appear as accessories of one bridge.
+6. `housebridgectl list lutron|hue|unifi` shows the exact device names to use in rules.
+7. `housebridgectl validate`, then `housebridgectl run --dry-run`, then `housebridgectl run`. The menu bar app reloads the config live.
 
 ## Rules
 
@@ -51,6 +52,29 @@ Each rule has a `when:` trigger and a list of `then:` actions.
 
 Run `housebridgectl devices` for a catalog of what each device reports, what it can do, and example rules to paste in.
 
+## HomeKit bridge
+
+`homekit:` makes HouseBridge a HomeKit bridge for UniFi Protect, driven by the same connection the rules use:
+
+| Protect | In Home.app |
+|---|---|
+| Camera motion | Motion sensor (plus one per smart detection with `smart_detections: true`) |
+| Doorbell ring | Programmable switch (single press) |
+| Door/window/garage sensor | Contact sensor, motion sensor |
+| Leak sensor | Leak sensor |
+
+There is no video or camera feed. Pairing identity and controllers are stored in `~/.config/housebridge/homekit.json`; deleting it (or `housebridgectl homekit --reset`) means pairing again. Only one HouseBridge process can run the bridge at a time. To move from Homebridge: remove the Protect accessories from Home.app, stop Homebridge, pair HouseBridge, then rebuild any Home automations that used the old accessories.
+
+### Importing from Homebridge
+
+`housebridgectl import-homebridge` reads a running Homebridge's `config.json` and writes the `unifi:` and `homekit:` sections for you. With no options it looks for HomeKit bridges over Bonjour, finds the one whose web UI (Homebridge Config UI X) answers on port 8581, asks for the UI login, and downloads the config through the UI's API. If that doesn't work, point it at the UI with `--ui http://<vm>:8581`, or copy `config.json` off the machine and use `--from-file`.
+
+```sh
+housebridgectl import-homebridge --store-password
+```
+
+It carries over the UniFi controller address and username. The password goes to the Keychain only with `--store-password`, never into the YAML. It lists what it could not carry over: Home.app automations, rooms and renamed accessories, other plugins, and the Protect plugin's feature options. Homebridge's Bonjour advertisement only reveals that a bridge exists and where it is; what it exposes can't be read without being paired to it, which is why the config comes from the UI. It never overwrites your config: if one exists, it appends only the `unifi:`/`homekit:` sections that are missing (leaving any you already have untouched), checks that the merged file parses and validates before writing, and keeps a timestamped `.bak-` copy of the original. If there is no config yet it creates one. `--out <file>` targets another file and `--print` just prints the YAML.
+
 ## Troubleshooting
 
 - `housebridgectl events` shows live input.
@@ -59,4 +83,4 @@ Run `housebridgectl devices` for a catalog of what each device reports, what it 
 
 ## Status
 
-The YAML parser, config validation, gesture timing, rule engine, and Protect packet decoding are unit-tested. The Lutron LEAP session, Hue calls, and Protect websocket have not yet been exercised against real hardware.
+The YAML parser, config validation, gesture timing, rule engine, and Protect packet decoding are unit-tested. The HomeKit pairing and session protocol is tested against an in-process controller written from the HAP spec (SRP checked against Python big-integer reference values), not against a real iPhone. The Lutron LEAP session, Hue calls, the Protect websocket, and the HomeKit bridge have not yet been exercised against real hardware.

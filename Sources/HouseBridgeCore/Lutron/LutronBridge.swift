@@ -33,6 +33,20 @@ public struct LutronInventory: Sendable {
     }
 }
 
+public enum LutronError: Error, CustomStringConvertible {
+    case notConnected
+    case unknownSwitch(String, available: [String])
+    case rejected(String)
+
+    public var description: String {
+        switch self {
+        case .notConnected: return "Lutron bridge is not connected"
+        case .unknownSwitch(let n, let a): return "no Lutron switch named ‘\(n)’ (known: \(a.joined(separator: ", ")))"
+        case .rejected(let c): return "Lutron bridge rejected the command (\(c))"
+        }
+    }
+}
+
 /// Connects to a Caseta Smart Bridge, discovers Picos and wired switches, and turns their activity into TriggerEvents.
 public final class LutronBridge: @unchecked Sendable {
     private let config: LutronConfig
@@ -44,6 +58,12 @@ public final class LutronBridge: @unchecked Sendable {
     private var buttonsByHref: [String: (LutronDevice, LutronButton)] = [:]
     private var devicesByZone: [String: LutronDevice] = [:]
     private var zoneState: [String: Bool] = [:]
+
+    // Output side: written by the session, read by rule actions from any thread.
+    private let outLock = NSLock()
+    private var liveConnection: LeapConnection?
+    private var switchDevices: [LutronDevice] = []
+    private var offTimers: [String: Task<Void, Never>] = [:]
 
     public init(config: LutronConfig,
                 emit: @escaping @Sendable (TriggerEvent) -> Void,
@@ -187,6 +207,8 @@ public final class LutronBridge: @unchecked Sendable {
             if let device = devicesByHref[b.deviceHref] { buttonsByHref[b.href] = (device, b) }
         }
         for d in inv.switches { if let z = d.zoneHref { devicesByZone[z] = d } }
+        outLock.withLock { liveConnection = conn; switchDevices = inv.switches }
+        defer { outLock.withLock { if liveConnection === conn { liveConnection = nil } } }
 
         for href in buttonsByHref.keys {
             _ = try await conn.request("SubscribeRequest", "\(href)/status/event")
@@ -209,6 +231,38 @@ public final class LutronBridge: @unchecked Sendable {
             try await group.next()
             group.cancelAll()
         }
+    }
+
+    // MARK: Output
+
+    /// Turns a switch/dimmer on or off. `device` matches the full name, name, href or model, case-insensitively.
+    /// With `offAfter`, schedules an off that any later call for the same device replaces.
+    public func setSwitch(_ device: String, on: Bool, offAfter: TimeInterval? = nil) async throws {
+        let wanted = device.lowercased()
+        let (conn, candidates) = outLock.withLock { (liveConnection, switchDevices) }
+        guard let conn else { throw LutronError.notConnected }
+        let matches = candidates.filter { [$0.fullName, $0.name, $0.href, $0.model].contains { $0.lowercased() == wanted } }
+        guard let target = matches.first, let zone = target.zoneHref else {
+            throw LutronError.unknownSwitch(device, available: candidates.map(\.fullName).sorted())
+        }
+        outLock.withLock { offTimers.removeValue(forKey: zone)?.cancel() }
+        try await LutronBridge.goToLevel(conn, zone: zone, level: on ? 100 : 0)
+        guard on, let offAfter else { return }
+        let timer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(offAfter))
+            guard !Task.isCancelled, let self else { return }
+            self.outLock.withLock { _ = self.offTimers.removeValue(forKey: zone) }
+            do { try await self.setSwitch(device, on: false) }
+            catch { self.log(LogEntry(level: .error, category: "lutron", message: "turning \(target.fullName) off failed: \(describeError(error))")) }
+        }
+        outLock.withLock { offTimers[zone] = timer }
+    }
+
+    static func goToLevel(_ conn: LeapConnection, zone: String, level: Int) async throws {
+        let body: JSON = ["Command": ["CommandType": "GoToLevel", "Parameter": [["Type": "Level", "Value": level]]]]
+        let response = try await conn.request("CreateRequest", "\(zone)/commandprocessor", body: body)
+        let code = status(of: response)
+        guard code.hasPrefix("2") else { throw LutronError.rejected(code) }
     }
 
     // MARK: Message handling

@@ -139,13 +139,14 @@ final class ProtectTests: XCTestCase {
 
     func testInterpretsMotionAndSmartDetectLifecycle() throws {
         let interp = ProtectInterpreter()
-        interp.devices["cam1"] = .init(name: "Front Camera", kind: "camera")
+        interp.devices["cam1"] = .init(id: "cam1", name: "Front Camera", kind: "camera")
         let add = ProtectUpdate(action: ["action": "add", "modelKey": "event", "id": "ev1"],
                                 data: ["type": "smartDetectZone", "camera": "cam1", "smartDetectTypes": ["person"]])
         let started = interp.interpret(add)
         XCTAssertEqual(started.map(\.input), ["person"])
         XCTAssertEqual(started.map(\.kind), ["start"])
         XCTAssertEqual(started.first?.device, "Front Camera")
+        XCTAssertEqual(started.first?.deviceID, "cam1", "HomeKit routes events by Protect device id")
 
         // Same event gains a second type, then ends: only the new type starts, then every started type ends.
         let more = interp.interpret(ProtectUpdate(action: ["action": "update", "modelKey": "event", "id": "ev1"],
@@ -162,13 +163,43 @@ final class ProtectTests: XCTestCase {
 
     func testSensorContactAndLeak() {
         let interp = ProtectInterpreter()
-        interp.devices["s1"] = .init(name: "Back Door", kind: "sensor")
+        interp.devices["s1"] = .init(id: "s1", name: "Back Door", kind: "sensor")
         let open = interp.interpret(ProtectUpdate(action: ["action": "update", "modelKey": "sensor", "id": "s1"], data: ["isOpened": true]))
         XCTAssertEqual(open.first?.input, "contact")
         XCTAssertEqual(open.first?.kind, "open")
         let leak = interp.interpret(ProtectUpdate(action: ["action": "update", "modelKey": "sensor", "id": "s1"], data: ["leakDetectedAt": 1700000000000]))
         XCTAssertEqual(leak.first?.input, "leak")
         XCTAssertEqual(leak.first?.kind, "start")
+    }
+}
+
+final class LutronActionConfigTests: XCTestCase {
+    func testParsesLutronAction() throws {
+        let cfg = try ConfigLoader.parse("""
+        lutron: { host: 1.1.1.1, ca: /x, cert: /x, key: /x }
+        unifi: { host: 3.3.3.3, username: u, password: p }
+        rules:
+          - name: r
+            when: { unifi: Cam, event: motion, state: start }
+            then:
+              - { action: lutron, switch: Garage Wall, on: true, off_after_seconds: 300 }
+        """)
+        guard case .lutron(let device, let on, let off)? = cfg.rules.first?.actions.first else { return XCTFail("not a lutron action") }
+        XCTAssertEqual(device, "Garage Wall")
+        XCTAssertTrue(on)
+        XCTAssertEqual(off, 300)
+    }
+
+    func testOffAfterRequiresOn() {
+        XCTAssertThrowsError(try ConfigLoader.parse("""
+        lutron: { host: 1.1.1.1, ca: /x, cert: /x, key: /x }
+        unifi: { host: 3.3.3.3, username: u, password: p }
+        rules:
+          - name: r
+            when: { unifi: Cam, event: motion, state: start }
+            then:
+              - { action: lutron, switch: Garage Wall, on: false, off_after_seconds: 300 }
+        """))
     }
 }
 
