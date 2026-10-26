@@ -64,6 +64,8 @@ public struct Rule: Sendable {
     public var cooldownSeconds: Double = 0
     /// When a presence hold covering this rule's devices ends, also run its actions (for "should always be true" rules).
     public var onResume = false
+    /// Keeps running while a presence hold is active, even for devices the hold pauses.
+    public var ignorePresence = false
     public var actions: [Action]
 }
 
@@ -427,7 +429,7 @@ public enum ConfigLoader {
     }
 
     private static func parseRule(_ r: Reader) throws -> Rule {
-        try r.rejectUnknown(["name", "enabled", "when", "between", "cooldown_seconds", "on_resume", "then"])
+        try r.rejectUnknown(["name", "enabled", "when", "between", "cooldown_seconds", "on_resume", "ignore_presence", "then"])
         guard let w = try r.reader("when") else { throw ConfigError(path: r.path, message: "missing 'when'") }
 
         let trigger = try parseTrigger(w)
@@ -453,7 +455,8 @@ public enum ConfigLoader {
         let name = try r.string("name") ?? "rule"
         let rule = Rule(name: name, enabled: try r.bool("enabled") ?? true, trigger: trigger, between: window,
                         cooldownSeconds: try r.double("cooldown_seconds") ?? 0,
-                        onResume: try r.bool("on_resume") ?? false, actions: actions)
+                        onResume: try r.bool("on_resume") ?? false,
+                        ignorePresence: try r.bool("ignore_presence") ?? false, actions: actions)
         if rule.trigger.source == .pico, rule.actions.contains(where: {
             if case .dim(_, _, true, _) = $0 { return true } else { return false }
         }), !["hold", "press"].contains(rule.trigger.kind) {

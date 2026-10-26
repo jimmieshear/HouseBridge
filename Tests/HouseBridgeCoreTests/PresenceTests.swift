@@ -39,6 +39,10 @@ final class PresenceTests: XCTestCase {
       - name: porch pico
         when: { pico: P, button: on, gesture: tap }
         then: [{ action: light, light: Porch, on: true }]
+      - name: porch always
+        ignore_presence: true
+        when: { unifi: Cam, event: motion, state: start }
+        then: [{ action: light, light: Porch, on: false }]
       - name: kitchen motion
         when: { unifi: Cam, event: motion, state: start }
         then: [{ action: light, light: Kitchen, on: true }]
@@ -88,7 +92,7 @@ final class PresenceTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(lutronCount(exec), 1, "garage motion rule is paused")
         let lights = exec.actions.compactMap { a -> String? in if case .light(let t, _) = a { return t.lights.first } else { return nil } }
-        XCTAssertEqual(lights, ["Kitchen", "Kitchen"], "kitchen is not covered and still runs; the paused Porch clock rule did not")
+        XCTAssertEqual(lights, ["Porch", "Kitchen", "Porch", "Kitchen"], "kitchen is not covered and the ignore_presence rule still runs; the paused Porch clock rule did not")
 
         // A person pressing a Pico always works, even for a covered light.
         await engine.handle(TriggerEvent(source: .pico, device: "P", input: "on", kind: "tap"))

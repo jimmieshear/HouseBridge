@@ -49,9 +49,9 @@ extension Action {
 }
 
 extension Rule {
-    /// Holds only pause automation. A Pico press is a person at the switch, so it always works.
+    /// Holds only pause automation. A Pico press is a person at the switch, so it always works, as does a rule marked `ignore_presence`.
     func isPaused(by hold: PresenceHold) -> Bool {
-        guard trigger.source != .pico else { return false }
+        guard trigger.source != .pico, !ignorePresence else { return false }
         return actions.contains { hold.pauses.covers($0.targets) }
     }
 }
