@@ -132,6 +132,8 @@ public struct LightState: Sendable {
     public var colorTempKelvin: Int?
     public var colorHex: String?
     public var transitionMs: Int?
+    /// With `on: true`, the engine turns the same target off this long after the last such action.
+    public var offAfterSeconds: Double?
 }
 
 public enum Action: Sendable {
@@ -473,7 +475,7 @@ public enum ConfigLoader {
         let kind = try r.requireString("action")
         switch kind {
         case "light":
-            try r.rejectUnknown(["action", "light", "room", "zone", "on", "brightness", "color_temp_kelvin", "color", "transition_ms"])
+            try r.rejectUnknown(["action", "light", "room", "zone", "on", "brightness", "color_temp_kelvin", "color", "transition_ms", "off_after_seconds"])
             let target = try parseTarget(r)
             guard !target.isEmpty else { throw ConfigError(path: r.path, message: "needs 'light:', 'room:' or 'zone:'") }
             var state = LightState()
@@ -482,6 +484,11 @@ public enum ConfigLoader {
             state.colorTempKelvin = try r.int("color_temp_kelvin")
             state.colorHex = try r.string("color")
             state.transitionMs = try r.int("transition_ms")
+            state.offAfterSeconds = try r.double("off_after_seconds")
+            if let off = state.offAfterSeconds {
+                guard off > 0 else { throw ConfigError(path: r.path + ".off_after_seconds", message: "must be greater than 0") }
+                guard state.on == true else { throw ConfigError(path: r.path + ".off_after_seconds", message: "only makes sense with 'on: true'") }
+            }
             if let b = state.brightness, !(0...100).contains(b) {
                 throw ConfigError(path: r.path + ".brightness", message: "must be 0–100")
             }

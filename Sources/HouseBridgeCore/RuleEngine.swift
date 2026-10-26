@@ -109,6 +109,8 @@ public actor RuleEngine {
     /// When each presence hold ends (only entries still in the future matter).
     private var holdUntil: [String: Date] = [:]
     private var holdTimers: [String: Task<Void, Never>] = [:]
+    /// Pending `off_after_seconds` timers for Hue lights, by target. A later action on the same target replaces or cancels it.
+    private var lightOffTimers: [String: (targets: PauseTargets, task: Task<Void, Never>)] = [:]
     private let holdStore: HoldStore?
     private let cancelLutronTimers: @Sendable ([String]) -> Void
     private let now: @Sendable () -> Date
@@ -155,6 +157,8 @@ public actor RuleEngine {
         runner = nil
         holdTimers.values.forEach { $0.cancel() }
         holdTimers = [:]
+        lightOffTimers.values.forEach { $0.task.cancel() }
+        lightOffTimers = [:]
         repeaters.values.forEach { $0.cancel() }
         clearTasks.values.forEach { $0.cancel() }
         repeaters = [:]
@@ -206,6 +210,10 @@ public actor RuleEngine {
             log(LogEntry(category: "presence", message: "‘\(hold.name)’: automation paused until \(RuleEngine.format(until)); renewed by each new trigger"))
             // A pending 'off in N minutes' is automation too.
             cancelLutronTimers(hold.pauses.lutron)
+            for (key, timer) in lightOffTimers where hold.pauses.covers(timer.targets) {
+                timer.task.cancel()
+                lightOffTimers.removeValue(forKey: key)
+            }
         }
         scheduleResume(hold, at: until)
     }
@@ -345,6 +353,9 @@ public actor RuleEngine {
         let name = rule.name
         let holdKey = event.key
 
+        // Timers are settled here, in order, not inside the task: two rules firing together must not race.
+        for action in actions { prepareLightTimer(for: action); armLightTimer(for: action, rule: name) }
+
         let task = Task { [weak self] in
             for action in actions {
                 if Task.isCancelled { return }
@@ -362,6 +373,35 @@ public actor RuleEngine {
         }
         _ = task
     }
+
+    private static func lightKey(_ t: HueTarget) -> String {
+        ["light": t.lights, "room": t.rooms, "zone": t.zones]
+            .flatMap { kind, names in names.map { "\(kind):\($0.lowercased())" } }.sorted().joined(separator: ",")
+    }
+
+    /// Any new command for a light target supersedes its pending auto-off.
+    private func prepareLightTimer(for action: Action) {
+        guard case .light(let target, _) = action else { return }
+        lightOffTimers.removeValue(forKey: RuleEngine.lightKey(target))?.task.cancel()
+    }
+
+    /// `off_after_seconds` on a `light` action: turn the same lights off after that long, unless re-armed first.
+    private func armLightTimer(for action: Action, rule: String) {
+        guard case .light(let target, let state) = action, state.on == true, let seconds = state.offAfterSeconds else { return }
+        let key = RuleEngine.lightKey(target)
+        let executor = self.executor, log = self.log
+        let off = Action.light(target, LightState(on: false, transitionMs: state.transitionMs))
+        let task = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            guard !Task.isCancelled else { return }
+            await self?.lightTimerFired(key)
+            do { try await executor.execute(off) }
+            catch { log(LogEntry(level: .error, category: "rules", message: "‘\(rule)’ auto-off failed: \(error)")) }
+        }
+        lightOffTimers[key] = (PauseTargets(lights: target.lights, rooms: target.rooms, zones: target.zones), task)
+    }
+
+    private func lightTimerFired(_ key: String) { lightOffTimers.removeValue(forKey: key) }
 
     private func startRepeating(key: String, action: Action, intervalMs: Int, executor: ActionExecutor,
                                 log: @escaping @Sendable (LogEntry) -> Void, rule: String) {

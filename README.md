@@ -48,6 +48,7 @@ Each rule has a `when:` trigger and a list of `then:` actions.
 |---|---|
 | **Triggers** | `at` (a 24-hour time, `sunrise` or `sunset`; see below), `pico` (button + gesture: `tap`, `double_tap`, `hold`, …), `switch` (on/off), `unifi` (`motion`, `person`, `vehicle`, `package`, … with `start`/`clear`) |
 | **Actions** | `light`, `toggle`, `scene`, `cycle_scenes`, `dim`, `wait`, `log` |
+| **Light timer** | `off_after_seconds` on a `light` action (with `on: true`) turns the same lights off that long after the last such action; new activity restarts it and any later command for those lights cancels it |
 | **Per rule** | `between`, `cooldown_seconds`, `enabled` |
 
 ### Time of day and sunrise/sunset

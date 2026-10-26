@@ -214,3 +214,64 @@ final class PresenceTests: XCTestCase {
         await engine.stop()
     }
 }
+
+final class LightAutoOffTests: XCTestCase {
+    private func engine(_ exec: RecordingExecutor) async throws -> RuleEngine {
+        let cfg = try ConfigLoader.parse("""
+        lutron: { host: 1.1.1.1, ca: /x, cert: /x, key: /x }
+        hue: { host: 2.2.2.2 }
+        unifi: { host: 3.3.3.3, username: u, password: p }
+        rules:
+          - name: lite on
+            when: { unifi: Door, event: motion, state: start }
+            then: [{ action: light, light: [A, B], on: true, brightness: 13, off_after_seconds: 0.3 }]
+          - name: lite re-arm
+            when: { unifi: Door, event: motion, state: end }
+            then: [{ action: light, light: [B, A], on: true, brightness: 13, off_after_seconds: 0.3 }]
+          - name: manual
+            when: { pico: P, button: on, gesture: tap }
+            then: [{ action: light, light: [A, B], on: true }]
+        """)
+        let e = RuleEngine(config: cfg, executor: exec, log: { _ in })
+        await e.start()
+        return e
+    }
+
+    private func states(_ exec: RecordingExecutor) -> [String] {
+        exec.actions.compactMap { if case .light(_, let s) = $0 { return s.on == true ? "on" : "off" } else { return nil } }
+    }
+
+    private func motion(_ kind: String) -> TriggerEvent { TriggerEvent(source: .unifi, device: "Door", input: "motion", kind: kind) }
+
+    func testTurnsOffAfterDelayAndNewActivityRestartsIt() async throws {
+        let exec = RecordingExecutor()
+        let e = try await engine(exec)
+        await e.handle(motion("start"))
+        try await Task.sleep(for: .milliseconds(200))
+        await e.handle(motion("end"))          // same lights in a different order: same timer, restarted
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(states(exec), ["on", "on"], "400 ms after the first on, but only 200 ms after the restart")
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(states(exec), ["on", "on", "off"])
+        await e.stop()
+    }
+
+    func testLaterCommandCancelsTheAutoOff() async throws {
+        let exec = RecordingExecutor()
+        let e = try await engine(exec)
+        await e.handle(motion("start"))
+        await e.handle(TriggerEvent(source: .pico, device: "P", input: "on", kind: "tap"))   // someone turns them on by hand
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertEqual(states(exec), ["on", "on"], "no automatic off after a manual command")
+        await e.stop()
+    }
+
+    func testRejectsBadOffAfter() {
+        func parse(_ a: String) throws {
+            _ = try ConfigLoader.parse("lutron: { host: 1.1.1.1, ca: /x, cert: /x, key: /x }\nhue: { host: 1.1.1.1 }\nrules:\n  - name: x\n    when: { pico: P, button: on }\n    then: [{ action: light, light: A, \(a) }]")
+        }
+        XCTAssertThrowsError(try parse("on: false, off_after_seconds: 5"))
+        XCTAssertThrowsError(try parse("on: true, off_after_seconds: 0"))
+        XCTAssertNoThrow(try parse("on: true, off_after_seconds: 300"))
+    }
+}
