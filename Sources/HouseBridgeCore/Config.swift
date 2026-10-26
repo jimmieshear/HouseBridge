@@ -7,6 +7,9 @@ public struct Config: Sendable {
     public var hue: HueConfig?
     public var unifi: UnifiConfig?
     public var homekit: HomeKitConfig?
+    /// Where the house is; needed for `sunrise`/`sunset` schedules.
+    public var location: GeoLocation?
+    public var presence: [PresenceHold] = []
     public var timing = Timing()
     public var rules: [Rule] = []
     public init() {}
@@ -59,6 +62,8 @@ public struct Rule: Sendable {
     public var trigger: TriggerSpec
     public var between: TimeWindow?
     public var cooldownSeconds: Double = 0
+    /// When a presence hold covering this rule's devices ends, also run its actions (for "should always be true" rules).
+    public var onResume = false
     public var actions: [Action]
 }
 
@@ -69,6 +74,8 @@ public struct TriggerSpec: Sendable {
     /// Button / sensor input; nil or "*" matches any.
     public var input: String?
     public var kind: String
+    /// Set for `clock` triggers; the scheduler fires these.
+    public var schedule: Schedule?
 
     public func matches(_ event: TriggerEvent, ignoringKind: Bool = false) -> Bool {
         guard event.source == source else { return false }
@@ -88,15 +95,25 @@ public struct TriggerSpec: Sendable {
 }
 
 public struct TimeWindow: Sendable {
-    public var startMinutes: Int
-    public var endMinutes: Int
+    public var start: Schedule
+    public var end: Schedule
 
-    /// Windows may wrap midnight (e.g. 18:00 → 06:00).
-    public func contains(_ date: Date, calendar: Calendar = .current) -> Bool {
-        let c = calendar.dateComponents([.hour, .minute], from: date)
-        let now = (c.hour ?? 0) * 60 + (c.minute ?? 0)
-        if startMinutes <= endMinutes { return now >= startMinutes && now < endMinutes }
-        return now >= startMinutes || now < endMinutes
+    public init(start: Schedule, end: Schedule) { self.start = start; self.end = end }
+    public init(startMinutes: Int, endMinutes: Int) {
+        self.init(start: Schedule(anchor: .clock(minutes: startMinutes)), end: Schedule(anchor: .clock(minutes: endMinutes)))
+    }
+
+    public var usesSun: Bool { start.usesSun || end.usesSun }
+
+    /// Windows may wrap midnight (e.g. 18:00 → 06:00) and may end at sunrise/sunset (compared using today's times).
+    public func contains(_ date: Date, location: GeoLocation? = nil, calendar: Calendar = .current) -> Bool {
+        guard let s = start.fireDate(onDayOf: date, location: location, calendar: calendar),
+              let e = end.fireDate(onDayOf: date, location: location, calendar: calendar) else { return false }
+        // Compare as times of day so a wrapping window is recognised whichever instants they land on.
+        func minutes(_ d: Date) -> Int { let c = calendar.dateComponents([.hour, .minute], from: d); return (c.hour ?? 0) * 60 + (c.minute ?? 0) }
+        let (sm, em, now) = (minutes(s), minutes(e), minutes(date))
+        if sm <= em { return now >= sm && now < em }
+        return now >= sm || now < em
     }
 }
 
@@ -149,7 +166,7 @@ public enum ConfigLoader {
         let root = try YAML.parse(text)
         guard case .map(let top) = root else { throw ConfigError(path: "", message: "top level must be a map") }
         let r = Reader(map: top, path: "")
-        try r.rejectUnknown(["lutron", "hue", "unifi", "homekit", "timing", "rules"])
+        try r.rejectUnknown(["lutron", "hue", "unifi", "homekit", "location", "presence", "timing", "rules"])
 
         var config = Config()
         if let l = try r.reader("lutron") {
@@ -198,6 +215,21 @@ public enum ConfigLoader {
             }
             cfg.smartDetections = try h.bool("smart_detections") ?? false
             config.homekit = cfg
+        }
+        if let l = try r.reader("location") {
+            try l.rejectUnknown(["latitude", "longitude"])
+            guard let lat = try l.double("latitude") else { throw ConfigError(path: l.path + ".latitude", message: "is required") }
+            guard let lon = try l.double("longitude") else { throw ConfigError(path: l.path + ".longitude", message: "is required") }
+            guard (-90...90).contains(lat) else { throw ConfigError(path: l.path + ".latitude", message: "must be between -90 and 90") }
+            guard (-180...180).contains(lon) else { throw ConfigError(path: l.path + ".longitude", message: "must be between -180 and 180 (west of Greenwich is negative)") }
+            config.location = GeoLocation(latitude: lat, longitude: lon)
+        }
+        if let p = top["presence"] {
+            guard case .array(let items) = p else { throw ConfigError(path: "presence", message: "must be a list") }
+            for (i, item) in items.enumerated() {
+                guard case .map(let m) = item else { throw ConfigError(path: "presence[\(i)]", message: "must be a map") }
+                config.presence.append(try parseHold(Reader(map: m, path: "presence[\(i)]")))
+            }
         }
         if let t = try r.reader("timing") {
             try t.rejectUnknown(["double_tap_ms", "hold_ms"])
@@ -255,12 +287,32 @@ public enum ConfigLoader {
         if config.homekit != nil && config.unifi == nil {
             throw ConfigError(path: "homekit", message: "publishes UniFi Protect devices to Home.app, so it needs a 'unifi:' section")
         }
+        var seen = Set<String>()
+        for hold in config.presence {
+            guard seen.insert(hold.name.lowercased()).inserted else { throw ConfigError(path: "presence", message: "two holds are named '\(hold.name)'") }
+            for t in hold.triggers {
+                switch t.source {
+                case .pico, .lutronSwitch:
+                    if config.lutron == nil { throw ConfigError(path: "presence", message: "hold '\(hold.name)' uses Lutron but there is no 'lutron:' section") }
+                case .unifi:
+                    if config.unifi == nil { throw ConfigError(path: "presence", message: "hold '\(hold.name)' uses UniFi but there is no 'unifi:' section") }
+                case .clock: break
+                }
+            }
+        }
         for rule in config.rules {
+            if rule.between?.usesSun == true && config.location == nil {
+                throw ConfigError(path: "rules", message: "rule '\(rule.name)' uses sunrise/sunset in 'between' but there is no 'location:' section (latitude and longitude)")
+            }
             switch rule.trigger.source {
             case .pico, .lutronSwitch:
                 if config.lutron == nil { throw ConfigError(path: "rules", message: "rule '\(rule.name)' uses Lutron but there is no 'lutron:' section") }
             case .unifi:
                 if config.unifi == nil { throw ConfigError(path: "rules", message: "rule '\(rule.name)' uses UniFi but there is no 'unifi:' section") }
+            case .clock:
+                if rule.trigger.schedule?.usesSun == true && config.location == nil {
+                    throw ConfigError(path: "rules", message: "rule '\(rule.name)' uses sunrise/sunset but there is no 'location:' section (latitude and longitude)")
+                }
             }
             let usesHue = rule.actions.contains {
                 switch $0 { case .wait, .log, .lutron: false; default: true }
@@ -278,10 +330,42 @@ public enum ConfigLoader {
     private static let picoGestures: Set<String> = ["press", "release", "tap", "double_tap", "hold", "hold_release"]
     private static let unifiStates: Set<String> = ["start", "end", "clear", "open", "closed"]
 
-    private static func parseRule(_ r: Reader) throws -> Rule {
-        try r.rejectUnknown(["name", "enabled", "when", "between", "cooldown_seconds", "then"])
-        guard let w = try r.reader("when") else { throw ConfigError(path: r.path, message: "missing 'when'") }
+    private static func parseHold(_ r: Reader) throws -> PresenceHold {
+        try r.rejectUnknown(["name", "when", "hold_hours", "hold_minutes", "pauses"])
+        var triggers: [TriggerSpec] = []
+        guard case .array(let rawWhen)? = r.map["when"], !rawWhen.isEmpty else {
+            throw ConfigError(path: r.path + ".when", message: "needs a non-empty list of triggers, e.g. - { unifi: Front Door Motion, event: motion, state: start }")
+        }
+        for (i, raw) in rawWhen.enumerated() {
+            guard case .map(let m) = raw else { throw ConfigError(path: "\(r.path).when[\(i)]", message: "must be a map") }
+            let t = try parseTrigger(Reader(map: m, path: "\(r.path).when[\(i)]"))
+            if t.source == .clock { throw ConfigError(path: "\(r.path).when[\(i)]", message: "a presence hold is set by a sensor or switch, not by the clock") }
+            triggers.append(t)
+        }
+        let hours = try r.double("hold_hours"), minutes = try r.double("hold_minutes")
+        if hours != nil && minutes != nil { throw ConfigError(path: r.path, message: "use either 'hold_hours' or 'hold_minutes', not both") }
+        let seconds = hours.map { $0 * 3600 } ?? minutes.map { $0 * 60 } ?? 24 * 3600
+        guard seconds > 0 else { throw ConfigError(path: r.path + ".hold_hours", message: "must be greater than 0") }
+        guard case .array(let rawPauses)? = r.map["pauses"], !rawPauses.isEmpty else {
+            throw ConfigError(path: r.path + ".pauses", message: "needs a non-empty list of devices, e.g. - { lutron: Garage Wall Lights }")
+        }
+        var pauses = PauseTargets()
+        for (i, raw) in rawPauses.enumerated() {
+            guard case .map(let m) = raw else { throw ConfigError(path: "\(r.path).pauses[\(i)]", message: "must be a map") }
+            let p = Reader(map: m, path: "\(r.path).pauses[\(i)]")
+            try p.rejectUnknown(["lutron", "light", "room", "zone"])
+            let before = pauses
+            pauses.lutron += try p.stringList("lutron")
+            pauses.lights += try p.stringList("light")
+            pauses.rooms += try p.stringList("room")
+            pauses.zones += try p.stringList("zone")
+            if pauses == before { throw ConfigError(path: p.path, message: "needs 'lutron:', 'light:', 'room:' or 'zone:'") }
+        }
+        return PresenceHold(name: try r.requireString("name"), triggers: triggers, duration: seconds, pauses: pauses)
+    }
 
+    /// One `when:` map: pico / switch / unifi / at.
+    private static func parseTrigger(_ w: Reader) throws -> TriggerSpec {
         let trigger: TriggerSpec
         if let device = try w.string("pico") {
             try w.rejectUnknown(["pico", "button", "gesture"])
@@ -304,17 +388,57 @@ public enum ConfigLoader {
                 throw ConfigError(path: w.path + ".state", message: "'\(state)' is not one of \(unifiStates.sorted().joined(separator: ", "))")
             }
             trigger = TriggerSpec(source: .unifi, device: device, input: try w.string("event") ?? "motion", kind: state)
+        } else if let at = try w.string("at") {
+            try w.rejectUnknown(["at", "offset_minutes", "days"])
+            let anchor: Schedule.Anchor
+            switch at.lowercased() {
+            case "sunrise": anchor = .sunrise
+            case "sunset": anchor = .sunset
+            default:
+                guard let minutes = parseClock(at) else {
+                    throw ConfigError(path: w.path + ".at", message: "expected a 24-hour time like \"18:30\", or sunrise / sunset")
+                }
+                anchor = .clock(minutes: minutes)
+            }
+            let offset = try w.int("offset_minutes") ?? 0
+            if offset != 0, case .clock = anchor {
+                throw ConfigError(path: w.path + ".offset_minutes", message: "only applies to sunrise / sunset; put the time in 'at:' instead")
+            }
+            guard abs(offset) <= 720 else { throw ConfigError(path: w.path + ".offset_minutes", message: "must be within ±720 (12 hours)") }
+            var days = Set<Int>()
+            for name in try w.stringList("days") {
+                switch name.lowercased() {
+                case "weekdays": days.formUnion(2...6)
+                case "weekends": days.formUnion([1, 7])
+                case "daily", "everyday": break
+                case let n:
+                    guard let i = Schedule.dayNames.firstIndex(of: String(n.prefix(3))), n.count >= 3 else {
+                        throw ConfigError(path: w.path + ".days", message: "'\(name)' is not a day (use mon, tue, wed, thu, fri, sat, sun, weekdays or weekends)")
+                    }
+                    days.insert(i + 1)
+                }
+            }
+            let schedule = Schedule(anchor: anchor, offsetMinutes: offset, days: days)
+            trigger = TriggerSpec(source: .clock, device: nil, input: schedule.key, kind: "fire", schedule: schedule)
         } else {
-            throw ConfigError(path: w.path, message: "needs one of 'pico:', 'switch:' or 'unifi:' naming the device (use \"*\" for any)")
+            throw ConfigError(path: w.path, message: "needs one of 'pico:', 'switch:', 'unifi:' (naming the device, \"*\" for any) or 'at:' (a time, sunrise or sunset)")
         }
+        return trigger
+    }
+
+    private static func parseRule(_ r: Reader) throws -> Rule {
+        try r.rejectUnknown(["name", "enabled", "when", "between", "cooldown_seconds", "on_resume", "then"])
+        guard let w = try r.reader("when") else { throw ConfigError(path: r.path, message: "missing 'when'") }
+
+        let trigger = try parseTrigger(w)
 
         var window: TimeWindow?
         if let b = r.map["between"] {
             guard case .array(let parts) = b, parts.count == 2,
-                  let s = parts[0].stringValue.flatMap(parseClock), let e = parts[1].stringValue.flatMap(parseClock) else {
-                throw ConfigError(path: r.path + ".between", message: "expected [\"18:00\", \"06:00\"]")
+                  let s = parts[0].stringValue.flatMap(parseTimePoint), let e = parts[1].stringValue.flatMap(parseTimePoint) else {
+                throw ConfigError(path: r.path + ".between", message: "expected two times such as [\"18:00\", \"06:00\"] or [\"23:00\", sunrise] (also sunset, sunset-30, sunrise+15)")
             }
-            window = TimeWindow(startMinutes: s, endMinutes: e)
+            window = TimeWindow(start: s, end: e)
         }
 
         guard case .array(let rawActions)? = r.map["then"], !rawActions.isEmpty else {
@@ -328,7 +452,8 @@ public enum ConfigLoader {
 
         let name = try r.string("name") ?? "rule"
         let rule = Rule(name: name, enabled: try r.bool("enabled") ?? true, trigger: trigger, between: window,
-                        cooldownSeconds: try r.double("cooldown_seconds") ?? 0, actions: actions)
+                        cooldownSeconds: try r.double("cooldown_seconds") ?? 0,
+                        onResume: try r.bool("on_resume") ?? false, actions: actions)
         if rule.trigger.source == .pico, rule.actions.contains(where: {
             if case .dim(_, _, true, _) = $0 { return true } else { return false }
         }), !["hold", "press"].contains(rule.trigger.kind) {
@@ -412,6 +537,20 @@ public enum ConfigLoader {
         default:
             throw ConfigError(path: r.path + ".action", message: "unknown action '\(kind)' (expected light, toggle, scene, cycle_scenes, dim, lutron, wait, log)")
         }
+    }
+
+    /// "18:30", "sunrise", "sunset", or either with a minute offset: "sunset-30", "sunrise+15".
+    static func parseTimePoint(_ text: String) -> Schedule? {
+        let t = text.trimmingCharacters(in: .whitespaces).lowercased()
+        if let m = parseClock(t) { return Schedule(anchor: .clock(minutes: m)) }
+        for (name, anchor) in [("sunrise", Schedule.Anchor.sunrise), ("sunset", .sunset)] where t.hasPrefix(name) {
+            let rest = t.dropFirst(name.count).trimmingCharacters(in: .whitespaces)
+            if rest.isEmpty { return Schedule(anchor: anchor) }
+            if rest.hasPrefix("+") || rest.hasPrefix("-"), let n = Int(rest.replacingOccurrences(of: " ", with: "")), abs(n) <= 720 {
+                return Schedule(anchor: anchor, offsetMinutes: n)
+            }
+        }
+        return nil
     }
 
     static func parseClock(_ s: String) -> Int? {

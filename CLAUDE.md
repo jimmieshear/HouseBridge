@@ -33,6 +33,8 @@ Use `HOUSEBRIDGE_HOME=/tmp/somewhere` to run the CLI against an isolated config/
   - `Config.swift`, `YAML.swift` – hand-written YAML subset parser and config validation (`ConfigLoader`)
   - `Hub.swift` – wires sources (Lutron, UniFi, HomeKit) to the rule engine and Hue; one Hub per loaded config
   - `RuleEngine.swift`, `Events.swift` – `TriggerEvent` (has an optional `deviceID`, the Protect id), gesture timing, cooldowns
+  - `Schedule.swift` – `when: { at: … }` rules: `Sun` (NOAA sunrise/sunset), `Schedule` (clock/sunrise/sunset + offset + weekdays), `ClockScheduler` (polls the wall clock every 10 s and emits `Source.clock` events; skips times >5 min late after Mac sleep). Needs `location:` for sun times. Sun math was cross-checked against an independent Meeus bisection, not just published tables
+  - `Presence.swift` – `presence:` holds ("someone is home"): sensor triggers pause automatic rules (non-Pico) that act on listed devices for `hold_hours`, sliding; `RuleEngine` keeps `holdUntil`, persists it via `HoldStore` (`holds.json`), cancels pending Lutron off-timers when a hold starts, and on expiry `reconcile` runs, per device, the latest `at:` rule due (`Schedule.previous`) plus any `on_resume` rules
   - `Lutron/`, `Hue/`, `UniFi/` – device clients. `UniFi/ProtectClient.swift` logs in, reads the bootstrap, follows the update websocket; `ProtectPacket.swift` decodes packets and `ProtectInterpreter` turns them into events
   - `HAP/` – the HomeKit bridge (see below)
   - `Import/` – Homebridge importer (see below)
@@ -90,3 +92,9 @@ Config (`homekit:` section): `name`, `port`, `setup_code` (validated; HomeKit re
 - The YAML parser rejects duplicate keys and tabs; config sections are validated with `rejectUnknown`, so new keys must be added to the allowed lists in `Config.swift`.
 - Existing tests construct `ProtectInterpreter.Device(id:name:kind:)` and `TriggerEvent`; keep new fields optional/defaulted.
 - Nothing in the HomeKit or importer work has been committed yet unless `git log` says otherwise; check `git status` before assuming.
+
+## HouseBridgePair (`Tools/HouseBridgePair/`, `scripts/build-pair.sh`)
+
+macOS Home.app has no Add Accessory command. `HMAccessorySetupManager` (macOS 27+; HomeKit ships only in the iOSSupport/Catalyst SDK) can show the system sheet, so this is a tiny Mac Catalyst app built outside SwiftPM with `swiftc -target <arch>-apple-ios27.0-macabi`. Ad-hoc signed: the sheet asks for the setup code. `--use-payload --uri X-HM://…` needs the restricted `com.apple.developer.homekit.allow-setup-payload` entitlement (Developer account + profile; `build-pair.sh --sign … --profile …`).
+
+- **Not verified:** it compiles and signs, but the agent sandbox cannot launch GUI apps, so `isSupported` and the pairing sheet have never been seen running. It must run on the same LAN as the bridge.

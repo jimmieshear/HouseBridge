@@ -34,6 +34,11 @@ unifi:
 #   # port: 51826                         # optional; default lets the system choose
 #   # smart_detections: true              # also a motion sensor each for person, vehicle, animal, ...
 
+# Where the house is; needed for sunrise/sunset schedules. West of Greenwich is negative.
+# location:
+#   latitude: 37.7749
+#   longitude: -122.4194
+
 timing:
   double_tap_ms: 300
   hold_ms: 500
@@ -41,6 +46,17 @@ timing:
 # Find names with:  housebridgectl list lutron | hue | unifi
 # Watch live events with:  housebridgectl events
 rules:
+  # Time-of-day rules (24-hour clock in this Mac's time zone). `at` is "HH:MM", sunrise or sunset;
+  # offset_minutes shifts sunrise/sunset; days limits it (mon..sun, weekdays, weekends).
+  # - name: Porch on 30 minutes before sunset
+  #   when: { at: sunset, offset_minutes: -30 }
+  #   then:
+  #     - { action: light, room: Front Porch, on: true, brightness: 80 }
+  # - name: Porch off at 23:30
+  #   when: { at: "23:30" }
+  #   then:
+  #     - { action: light, room: Front Porch, on: false }
+
   - name: Family room on
     when: { pico: Family Room Pico, button: on, gesture: tap }
     then:

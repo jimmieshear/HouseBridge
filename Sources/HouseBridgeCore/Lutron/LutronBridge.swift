@@ -173,16 +173,17 @@ public final class LutronBridge: @unchecked Sendable {
 
     public func run() async {
         var backoff: Double = 2
+        var everConnected = false   // once we have connected, later failures are the device's, not a Local Network block
         while !Task.isCancelled {
             status(.connecting)
             var upSince: Date?
             do {
-                try await session(onConnected: { upSince = Date() })
+                try await session(onConnected: { upSince = Date(); everConnected = true })
                 if Task.isCancelled { return }
                 status(.disconnected("connection closed"))
             } catch {
                 if Task.isCancelled { return }
-                let hint = localNetworkHint(for: error, host: config.host)
+                let hint = everConnected ? nil : localNetworkHint(for: error, host: config.host)
                 log(LogEntry(level: .warning, category: "lutron", message: describeError(error) + (hint.map { "\n" + $0 } ?? "")))
                 status(.disconnected(hint != nil ? "can't reach \(config.host) — check Local Network permission (see log)" : "\(error)"))
             }
@@ -256,6 +257,16 @@ public final class LutronBridge: @unchecked Sendable {
             catch { self.log(LogEntry(level: .error, category: "lutron", message: "turning \(target.fullName) off failed: \(describeError(error))")) }
         }
         outLock.withLock { offTimers[zone] = timer }
+    }
+
+    /// Cancels pending `off_after_seconds` timers for these switches (names as in rules), leaving their state as is.
+    public func cancelOffTimers(for devices: [String]) {
+        let wanted = Set(devices.map { $0.lowercased() })
+        outLock.withLock {
+            for d in switchDevices where [d.fullName, d.name, d.href, d.model].contains(where: { wanted.contains($0.lowercased()) }) {
+                if let zone = d.zoneHref { offTimers.removeValue(forKey: zone)?.cancel() }
+            }
+        }
     }
 
     static func goToLevel(_ conn: LeapConnection, zone: String, level: Int) async throws {

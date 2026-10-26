@@ -8,6 +8,7 @@ public struct Paths: Sendable {
     public var logsDirectory: URL { home.appendingPathComponent("logs") }
     public var homeKitFile: URL { home.appendingPathComponent("homekit.json") }
     public var homeKitLockFile: URL { home.appendingPathComponent("homekit.lock") }
+    public var holdsFile: URL { home.appendingPathComponent("holds.json") }
     public var knownHostsFile: URL { home.appendingPathComponent("known_hosts.json") }
 
     public init(home: URL) { self.home = home }

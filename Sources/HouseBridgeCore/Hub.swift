@@ -108,9 +108,18 @@ public final class Hub: @unchecked Sendable {
         // Lutron (input, and output for `lutron` actions)
         var lutronBridge: LutronBridge?
         let router = ActionRouter(hue: executor, log: log)
-        let engine = RuleEngine(config: config, executor: router, onEvent: eventSink, log: log)
+        // Dry runs must not touch the real hold state.
+        let engine = RuleEngine(config: config, executor: router, onEvent: eventSink,
+                                holdStore: dryRun ? nil : HoldStore(url: paths.holdsFile),
+                                cancelLutronTimers: { [weak router] in router?.lutron?.cancelOffTimers(for: $0) }, log: log)
         self.engine = engine
         Task { await engine.start() }
+
+        let schedules = config.rules.filter(\.enabled).compactMap(\.trigger.schedule)
+        if !schedules.isEmpty {
+            let scheduler = ClockScheduler(schedules: schedules, location: config.location, emit: { engine.submit($0) }, log: log)
+            tasks.append(Task { await scheduler.run() })
+        }
 
         if let lutron = config.lutron, case let missing = lutron.missingFiles(), !missing.isEmpty {
             status(.lutron, .needsSetup("PEM file not found"))

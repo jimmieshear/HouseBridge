@@ -106,14 +106,26 @@ public actor RuleEngine {
     private var repeaters: [String: Task<Void, Never>] = [:]
     private var clearTasks: [String: Task<Void, Never>] = [:]
     private var runner: Task<Void, Never>?
+    /// When each presence hold ends (only entries still in the future matter).
+    private var holdUntil: [String: Date] = [:]
+    private var holdTimers: [String: Task<Void, Never>] = [:]
+    private let holdStore: HoldStore?
+    private let cancelLutronTimers: @Sendable ([String]) -> Void
+    private let now: @Sendable () -> Date
 
     public init(config: Config, executor: ActionExecutor,
                 onEvent: @escaping @Sendable (TriggerEvent) -> Void = { _ in },
+                holdStore: HoldStore? = nil,
+                cancelLutronTimers: @escaping @Sendable ([String]) -> Void = { _ in },
+                now: @escaping @Sendable () -> Date = { Date() },
                 log: @escaping @Sendable (LogEntry) -> Void) {
         self.config = config
         self.executor = executor
         self.log = log
         self.onEvent = onEvent
+        self.holdStore = holdStore
+        self.cancelLutronTimers = cancelLutronTimers
+        self.now = now
         var cont: AsyncStream<TriggerEvent>.Continuation!
         stream = AsyncStream { cont = $0 }
         continuation = cont
@@ -126,6 +138,7 @@ public actor RuleEngine {
 
     public func start() {
         guard runner == nil else { return }
+        restoreHolds()
         let cont = continuation
         detector = GestureDetector(holdMs: config.timing.holdMs, doubleTapMs: config.timing.doubleTapMs) { cont.yield($0) }
         runner = Task { [weak self] in
@@ -140,6 +153,8 @@ public actor RuleEngine {
         continuation.finish()
         runner?.cancel()
         runner = nil
+        holdTimers.values.forEach { $0.cancel() }
+        holdTimers = [:]
         repeaters.values.forEach { $0.cancel() }
         clearTasks.values.forEach { $0.cancel() }
         repeaters = [:]
@@ -161,9 +176,129 @@ public actor RuleEngine {
             repeaters.removeValue(forKey: event.key)?.cancel()
         }
 
+        // Holds first, so a sensor that starts a hold also pauses the rules it triggers.
+        for hold in config.presence where hold.triggers.contains(where: { $0.matches(event) }) {
+            extend(hold)
+        }
         for rule in config.rules where rule.enabled && rule.trigger.matches(event) {
             fire(rule, for: event)
         }
+    }
+
+    // MARK: Presence holds
+
+    private func activeHold(pausing rule: Rule) -> (hold: PresenceHold, until: Date)? {
+        for hold in config.presence {
+            if let until = holdUntil[hold.name], until > now(), rule.isPaused(by: hold) { return (hold, until) }
+        }
+        return nil
+    }
+
+    /// (Re)starts a hold: it now ends `duration` after this trigger.
+    private func extend(_ hold: PresenceHold) {
+        let until = now().addingTimeInterval(hold.duration)
+        let old = holdUntil[hold.name].flatMap { $0 > now() ? $0 : nil }
+        // A busy sensor must not rewrite the state file on every event.
+        if let old, until.timeIntervalSince(old) < 60 { return }
+        holdUntil[hold.name] = until
+        holdStore?.save(holdUntil)
+        if old == nil {
+            log(LogEntry(category: "presence", message: "‘\(hold.name)’: automation paused until \(RuleEngine.format(until)); renewed by each new trigger"))
+            // A pending 'off in N minutes' is automation too.
+            cancelLutronTimers(hold.pauses.lutron)
+        }
+        scheduleResume(hold, at: until)
+    }
+
+    private func scheduleResume(_ hold: PresenceHold, at until: Date) {
+        holdTimers.removeValue(forKey: hold.name)?.cancel()
+        let name = hold.name
+        holdTimers[name] = Task { [weak self] in
+            // Re-check after waking: Mac sleep or a renewed hold can move the deadline.
+            while let remaining = await self?.remaining(name), remaining > 0 {
+                try? await Task.sleep(for: .seconds(min(remaining, 3600) + 0.5))
+                if Task.isCancelled { return }
+            }
+            await self?.resumed(name)
+        }
+    }
+
+    private func remaining(_ name: String) -> TimeInterval? { holdUntil[name].map { $0.timeIntervalSince(now()) } }
+
+    /// Visible for tests.
+    func resumed(_ name: String) {
+        guard let until = holdUntil[name], until <= now() else { return }
+        holdUntil.removeValue(forKey: name)
+        holdTimers.removeValue(forKey: name)
+        holdStore?.save(holdUntil)
+        log(LogEntry(category: "presence", message: "‘\(name)’: no trigger for the hold period; automation resumed"))
+        if let hold = config.presence.first(where: { $0.name == name }) { reconcile(hold) }
+    }
+
+    /// After a hold, put the devices it covered where the automation would have them *now*. Event rules can't say
+    /// that, so this uses the schedule rules: for each device, the most recent `at:` rule that should have run
+    /// (honouring `days` and `between`) wins and its action is run. Rules marked `on_resume` then run too.
+    func reconcile(_ hold: PresenceHold) {
+        struct Candidate { var at: Date; var rule: String; var action: Action }
+        let current = now()
+        let held = Set(hold.pauses.keys)
+        var latest: [String: Candidate] = [:]
+        for rule in config.rules where rule.enabled {
+            guard let schedule = rule.trigger.schedule,
+                  let at = schedule.previous(onOrBefore: current, location: config.location),
+                  rule.between?.contains(at, location: config.location) ?? true else { continue }
+            for action in rule.actions {
+                for key in action.targets.keys where held.contains(key) {
+                    if let existing = latest[key], existing.at > at { continue }
+                    latest[key] = Candidate(at: at, rule: rule.name, action: action)
+                }
+            }
+        }
+        // Each action once (it can win for several devices), oldest first so later rules overwrite earlier ones.
+        var plan: [(at: Date, rule: String, action: Action)] = []
+        for (_, c) in latest.sorted(by: { $0.value.at < $1.value.at }) where !plan.contains(where: { $0.rule == c.rule && "\($0.action)" == "\(c.action)" }) {
+            plan.append((c.at, c.rule, c.action))
+        }
+        for rule in config.rules where rule.enabled && rule.onResume && rule.isPaused(by: hold) {
+            for action in rule.actions where hold.pauses.covers(action.targets) { plan.append((current, rule.name, action)) }
+        }
+        let stillHeld = plan.filter { item in
+            config.presence.contains { other in
+                other.name != hold.name && (holdUntil[other.name].map { $0 > current } ?? false) && other.pauses.covers(item.action.targets)
+            }
+        }.map(\.rule)
+        let executor = self.executor, log = self.log
+        for item in plan where !stillHeld.contains(item.rule) {
+            log(LogEntry(category: "presence", message: "restoring from ‘\(item.rule)’ (last due \(RuleEngine.format(item.at)))"))
+        }
+        let runnable = plan.filter { !stillHeld.contains($0.rule) }.map { ($0.rule, $0.action) }
+        Task {
+            for (rule, action) in runnable {
+                do { try await RuleEngine.run(action, executor: executor, log: log) }
+                catch { log(LogEntry(level: .error, category: "presence", message: "restoring from ‘\(rule)’ failed: \(error)")) }
+            }
+        }
+    }
+
+    private func restoreHolds() {
+        guard let holdStore else { return }
+        let saved = holdStore.load()
+        for hold in config.presence {
+            guard let until = saved[hold.name], until > now() else { continue }
+            holdUntil[hold.name] = until
+            log(LogEntry(category: "presence", message: "‘\(hold.name)’: automation still paused until \(RuleEngine.format(until))"))
+            scheduleResume(hold, at: until)
+        }
+        // A hold that ended while HouseBridge was not running still needs its devices put right.
+        for hold in config.presence where saved[hold.name].map({ $0 <= now() }) ?? false { reconcile(hold) }
+        holdStore.save(holdUntil)   // drops holds that ended or were removed from the config
+    }
+
+    static func format(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEE MMM d HH:mm"
+        return f.string(from: date)
     }
 
     private func wantsDoubleTap(_ event: TriggerEvent) -> Bool {
@@ -188,7 +323,11 @@ public actor RuleEngine {
     }
 
     private func fire(_ rule: Rule, for event: TriggerEvent) {
-        if let window = rule.between, !window.contains(Date()) {
+        if let (hold, until) = activeHold(pausing: rule) {
+            log(LogEntry(category: "rules", message: "‘\(rule.name)’ skipped: paused by ‘\(hold.name)’ until \(RuleEngine.format(until))"))
+            return
+        }
+        if let window = rule.between, !window.contains(Date(), location: config.location) {
             log(LogEntry(category: "rules", message: "‘\(rule.name)’ skipped: outside time window"))
             return
         }

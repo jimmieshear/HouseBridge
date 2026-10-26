@@ -143,8 +143,8 @@ final class ProtectTests: XCTestCase {
         let add = ProtectUpdate(action: ["action": "add", "modelKey": "event", "id": "ev1"],
                                 data: ["type": "smartDetectZone", "camera": "cam1", "smartDetectTypes": ["person"]])
         let started = interp.interpret(add)
-        XCTAssertEqual(started.map(\.input), ["person"])
-        XCTAssertEqual(started.map(\.kind), ["start"])
+        XCTAssertEqual(started.map(\.input), ["motion", "person"], "a smart detection also raises motion")
+        XCTAssertEqual(started.map(\.kind), ["start", "start"])
         XCTAssertEqual(started.first?.device, "Front Camera")
         XCTAssertEqual(started.first?.deviceID, "cam1", "HomeKit routes events by Protect device id")
 
@@ -154,11 +154,41 @@ final class ProtectTests: XCTestCase {
         XCTAssertEqual(more.map(\.input), ["vehicle"])
         let ended = interp.interpret(ProtectUpdate(action: ["action": "update", "modelKey": "event", "id": "ev1"],
                                                    data: ["end": 12345]))
-        XCTAssertEqual(Set(ended.map(\.input)), ["person", "vehicle"])
+        XCTAssertEqual(Set(ended.map(\.input)), ["person", "vehicle", "motion"])
         XCTAssertTrue(ended.allSatisfy { $0.kind == "end" })
         // Late updates after the end are ignored.
         XCTAssertTrue(interp.interpret(ProtectUpdate(action: ["action": "update", "modelKey": "event", "id": "ev1"],
                                                      data: ["score": 90])).isEmpty)
+    }
+
+    func testCameraMotionFromCameraFieldWithoutMotionEvents() {
+        let interp = ProtectInterpreter()
+        interp.devices["cam1"] = .init(id: "cam1", name: "North", kind: "camera")
+        func cam(_ d: JSON) -> [TriggerEvent] { interp.interpret(ProtectUpdate(action: ["action": "update", "modelKey": "camera", "id": "cam1"], data: d)) }
+        XCTAssertEqual(cam(["isMotionDetected": true]).map(\.kind), ["start"])
+        XCTAssertTrue(cam(["isMotionDetected": true]).isEmpty, "repeat is not a new start")
+        XCTAssertTrue(cam(["lastMotion": 1]).isEmpty)
+        XCTAssertEqual(cam(["isMotionDetected": false]).map(\.kind), ["end"])
+        XCTAssertTrue(cam(["isMotionDetected": false]).isEmpty)
+        // A motion event record alongside the camera flag must not double-fire.
+        XCTAssertEqual(cam(["isMotionDetected": true]).count, 1)
+        let add = interp.interpret(ProtectUpdate(action: ["action": "add", "modelKey": "event", "id": "e1"], data: ["type": "motion", "camera": "cam1"]))
+        XCTAssertTrue(add.isEmpty)
+        XCTAssertTrue(cam(["isMotionDetected": false]).isEmpty, "the open motion event keeps it moving")
+        let end = interp.interpret(ProtectUpdate(action: ["action": "update", "modelKey": "event", "id": "e1"], data: ["end": 1]))
+        XCTAssertEqual(end.map(\.kind), ["end"])
+    }
+
+    func testAnimalIsMotionAndAudioAlarmIsNot() {
+        let interp = ProtectInterpreter()
+        interp.devices["cam1"] = .init(id: "cam1", name: "North", kind: "camera")
+        func ev(_ a: String, _ id: String, _ d: JSON) -> [TriggerEvent] { interp.interpret(ProtectUpdate(action: ["action": a, "modelKey": "event", "id": id], data: d)) }
+        XCTAssertTrue(ev("add", "bark", ["type": "smartAudioDetect", "camera": "cam1", "smartDetectTypes": ["alrmBark"]]).allSatisfy { $0.input != "motion" })
+        XCTAssertEqual(ev("add", "a1", ["type": "smartDetectZone", "camera": "cam1", "smartDetectTypes": ["animal"]]).map(\.input), ["motion", "animal"])
+        // A second overlapping detection does not restart motion, and the first ending does not end it.
+        XCTAssertEqual(ev("add", "a2", ["type": "smartDetectZone", "camera": "cam1", "smartDetectTypes": ["face"]]).map(\.input), ["face"])
+        XCTAssertEqual(ev("update", "a1", ["end": 1]).map(\.input), ["animal"])
+        XCTAssertEqual(ev("update", "a2", ["end": 2]).map(\.input), ["face", "motion"])
     }
 
     func testSensorContactAndLeak() {

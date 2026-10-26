@@ -46,9 +46,46 @@ Each rule has a `when:` trigger and a list of `then:` actions.
 
 | | Options |
 |---|---|
-| **Triggers** | `pico` (button + gesture: `tap`, `double_tap`, `hold`, …), `switch` (on/off), `unifi` (`motion`, `person`, `vehicle`, `package`, … with `start`/`clear`) |
+| **Triggers** | `at` (a 24-hour time, `sunrise` or `sunset`; see below), `pico` (button + gesture: `tap`, `double_tap`, `hold`, …), `switch` (on/off), `unifi` (`motion`, `person`, `vehicle`, `package`, … with `start`/`clear`) |
 | **Actions** | `light`, `toggle`, `scene`, `cycle_scenes`, `dim`, `wait`, `log` |
 | **Per rule** | `between`, `cooldown_seconds`, `enabled` |
+
+### Time of day and sunrise/sunset
+
+```yaml
+location: { latitude: 37.7749, longitude: -122.4194 }   # west of Greenwich is negative; only needed for sun times
+
+rules:
+  - name: Porch on before sunset
+    when: { at: sunset, offset_minutes: -30 }
+    then: [{ action: light, room: Front Porch, on: true, brightness: 80 }]
+
+  - name: Porch off late
+    when: { at: "23:30", days: [fri, sat] }
+    then: [{ action: light, room: Front Porch, on: false }]
+
+  - name: Garage light off at dawn
+    when: { at: sunrise }
+    then: [{ action: lutron, switch: Garage Wall Lights, on: false }]
+```
+
+`at` is `"HH:MM"` on a 24-hour clock in the Mac's time zone, or `sunrise` / `sunset`; `offset_minutes` (negative = before) shifts the sun times, and `days` limits it (`mon`…`sun`, `weekdays`, `weekends`). Quote clock times. `between` and `cooldown_seconds` work as usual. Sun times are calculated locally from `location:` (accurate to about a minute). If the Mac is asleep through a scheduled time it is skipped when more than 5 minutes late, so waking at midnight does not run the sunset rule. `housebridgectl schedule` shows today's sunrise/sunset and each rule's next run.
+
+### Pausing automation while someone is home
+
+```yaml
+presence:
+  - name: Someone is home
+    hold_hours: 24                 # or hold_minutes; default 24 hours
+    when:                          # any of these starts (or renews) the hold
+      - { unifi: Front Door Motion, event: motion, state: start }
+      - { unifi: UP Sense GarageDoor, event: contact, state: open }
+    pauses:                        # devices, named as in your rules
+      - lutron: Garage Wall Lights
+      - light: Hue outdoor wall 1  # also room: / zone:
+```
+
+While a hold is active, rules triggered by a sensor, the clock or a Lutron switch that act on a listed device are skipped (logged as "paused by …"), so people can use those lights by hand. Pico button presses are never paused. Every new trigger restarts the clock, so the hold ends only after a full `hold_hours` with no trigger; automation then resumes on its own. A pending `off_after_seconds` on a paused Lutron switch is cancelled when the hold starts. The end time is saved in `holds.json`, so reloads and restarts don't cut a hold short. `housebridgectl presence` shows what is paused and until when. **When a hold ends**, each paused device is put where the schedule would have it right now: for every listed device, the most recent time-of-day (`at:`) rule that targets it, respecting `days` and `between`, is run once. For example, if the hold ends at 9pm and the rules are sunset → on, 23:00 → off, sunrise → off, the light turns on; at 2am it turns off. Add `on_resume: true` to any other rule (say, one that turns a Lutron switch back on whenever it is switched off) to run it too at that moment. Sensor-triggered rules are not replayed; they act on the next event. If HouseBridge was not running when a hold ended, this happens at the next start.
 
 Run `housebridgectl devices` for a catalog of what each device reports, what it can do, and example rules to paste in.
 

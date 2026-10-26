@@ -72,6 +72,10 @@ final class ProtectInterpreter {
     var devices: [String: Device] = [:]
     private var events: [String: TrackedEvent] = [:]
     private var order: [String] = []
+    /// Cameras whose own `isMotionDetected` is set. Protect reports motion as an `event` of type motion, as this
+    /// flag, or (with "smart detections only" recording) just as smart detections, so `motion` is derived from all
+    /// three: active while the flag is set or any non-audio event is open.
+    private var flagMoving: Set<String> = []
 
     func interpret(_ update: ProtectUpdate) -> [TriggerEvent] {
         let action = update.action["action"] as? String ?? ""
@@ -80,7 +84,14 @@ final class ProtectInterpreter {
         switch model {
         case "event": return interpretEvent(action: action, id: id, data: update.data)
         case "sensor": return interpretSensor(id: id, data: update.data)
+        case "camera": return interpretCamera(id: id, data: update.data)
         default: return []
+        }
+    }
+
+    private func isMoving(_ cameraId: String) -> Bool {
+        flagMoving.contains(cameraId) || events.values.contains {
+            $0.cameraId == cameraId && !$0.finished && $0.startedInputs.contains("motion")
         }
     }
 
@@ -111,20 +122,34 @@ final class ProtectInterpreter {
         }
         // smartDetectTypes may arrive on "add" or on a later "update".
         if let types = data["smartDetectTypes"] as? [String] { types.forEach { inputs.insert($0) } }
+        // Anything seen (animal, person, vehicle, face, ...) is motion; audio alarms (alrmSiren, alrmBark, ...) are not.
+        if inputs.contains(where: { $0 != "ring" && !$0.hasPrefix("alrm") }) { inputs.insert("motion") }
         // An update to a tracked event that doesn't restate type keeps its previously-started inputs alive.
 
         if tracked.finished { return [] }
+        let wasMoving = isMoving(camera.id)
         for input in inputs.sorted() where !tracked.startedInputs.contains(input) {
             tracked.startedInputs.insert(input)
+            if input == "motion" { continue }   // emitted below, once for all overlapping sources
             out.append(event(camera, input: input, kind: "start", detail: (data["score"] as? Int).map { "score \($0)" }))
             if input == "ring" { /* a ring is momentary; treat as start+end */ }
         }
         if let end = data["end"], !(end is NSNull) {
             tracked.finished = true
-            for input in tracked.startedInputs.sorted() { out.append(event(camera, input: input, kind: "end")) }
+            for input in tracked.startedInputs.sorted() where input != "motion" { out.append(event(camera, input: input, kind: "end")) }
         }
         events[id] = tracked
+        let moving = isMoving(camera.id)
+        if moving != wasMoving { out.insert(event(camera, input: "motion", kind: moving ? "start" : "end"), at: moving ? 0 : out.count) }
         return out
+    }
+
+    private func interpretCamera(id: String, data: JSON) -> [TriggerEvent] {
+        guard let camera = devices[id], let flag = data["isMotionDetected"] as? Bool else { return [] }
+        let was = isMoving(id)
+        if flag { flagMoving.insert(id) } else { flagMoving.remove(id) }
+        let now = isMoving(id)
+        return now == was ? [] : [event(camera, input: "motion", kind: now ? "start" : "end")]
     }
 
     private func interpretSensor(id: String, data: JSON) -> [TriggerEvent] {

@@ -1,7 +1,9 @@
 import Foundation
+import Network
 
 /// Turns an Error into something diagnosable: type, domain/code, failing URL and underlying causes.
 public func describeError(_ error: Error) -> String {
+    if let friendly = posixSummary(error) { return friendly }
     var parts: [String] = ["\(error)"]
     let ns = error as NSError
     if "\(error)" != ns.localizedDescription { parts.append(ns.localizedDescription) }
@@ -9,6 +11,19 @@ public func describeError(_ error: Error) -> String {
     if let url = ns.userInfo[NSURLErrorFailingURLStringErrorKey] as? String { parts.append("url=\(url)") }
     if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? Error { parts.append("caused by: " + describeError(underlying)) }
     return parts.joined(separator: " ")
+}
+
+/// One-line text for the connection errors Network.framework reports as POSIX codes, which otherwise print as
+/// "POSIXErrorCode(rawValue: 61): Connection refused The operation couldn't be completed. (Network.NWE…".
+func posixSummary(_ error: Error) -> String? {
+    guard case .posix(let code)? = error as? NWError else { return nil }
+    switch code {
+    case .ECONNREFUSED: return "connection refused (the device is up but not accepting connections; it may be busy, restarting, or at its connection limit)"
+    case .ETIMEDOUT: return "connection timed out (no reply; the device is offline, rebooting or the address is wrong)"
+    case .EHOSTUNREACH: return "no route to host"
+    case .ENETUNREACH: return "network unreachable"
+    default: return nil
+    }
 }
 
 /// Append-only log file with simple size-based rotation (housebridge.log, .1, .2). Safe from any thread.
@@ -78,6 +93,7 @@ public func localNetworkHint(for error: Error, host: String) -> String? {
         || (host.hasPrefix("172.") && (Int(host.split(separator: ".").dropFirst().first ?? "") ?? 0).clamped(16...31))
         || host.hasSuffix(".local")
     guard isPrivate else { return nil }
+    if case .posix(.ECONNREFUSED)? = error as? NWError { return nil }   // the host replied, so it is not a permission block
     let ns = error as NSError
     var codes: [(String, Int)] = [(ns.domain, ns.code)]
     if let u = ns.userInfo[NSUnderlyingErrorKey] as? NSError { codes.append((u.domain, u.code)) }

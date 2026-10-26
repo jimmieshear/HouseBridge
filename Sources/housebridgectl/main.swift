@@ -16,6 +16,8 @@ func usage() -> Never {
     COMMANDS
       init                 Write a starter config to \(paths.configFile.path)
       validate             Check the config file and print a summary of its rules
+      schedule             Show today's sunrise/sunset and when each time-of-day rule fires next
+      presence             Show each presence hold (which automation is paused, and until when)
       run [--dry-run]      Run the bridge (Ctrl-C to stop). --dry-run logs actions instead of changing lights.
       set-unifi-password   Store the UniFi password in the macOS Keychain (--delete removes it)
       pair-hue             Pair with the Hue bridge (press its link button first)
@@ -157,7 +159,39 @@ case "validate":
     }
     for r in config.rules {
         let t = r.trigger
+        if let sched = t.schedule { print("  • \(r.name): \(sched.summary) → \(r.actions.count) action(s)\(r.enabled ? "" : "  [disabled]")"); continue }
         print("  • \(r.name): \(t.source.rawValue) \(t.device ?? "*") / \(t.input ?? "*") / \(t.kind) → \(r.actions.count) action(s)\(r.enabled ? "" : "  [disabled]")")
+    }
+
+case "schedule":
+    let config = loadConfig()
+    let f = DateFormatter(); f.dateFormat = "EEE MMM d HH:mm"
+    if let loc = config.location {
+        print("Location: \(loc.latitude), \(loc.longitude)  ·  time zone \(TimeZone.current.identifier)")
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        for e in [Sun.Event.sunrise, .sunset] {
+            let t = Sun.time(e, year: c.year!, month: c.month!, day: c.day!, at: loc)
+            print("  today's \(e.rawValue): \(t.map { f.string(from: $0) } ?? "none (polar)")")
+        }
+    } else { print("No location: set — sunrise/sunset rules are unavailable.") }
+    let timed = config.rules.filter { $0.trigger.schedule != nil }
+    if timed.isEmpty { print("No time-of-day rules (use `when: { at: \"18:30\" }` or `at: sunset`).") }
+    for r in timed {
+        let sched = r.trigger.schedule!
+        let next = sched.next(after: Date(), location: config.location).map { f.string(from: $0) } ?? "never"
+        print("  • \(r.name): \(sched.summary) → next \(next)\(r.enabled ? "" : "  [disabled]")")
+    }
+
+case "presence":
+    let config = loadConfig()
+    if config.presence.isEmpty { print("No presence holds (add a `presence:` section; see README).") }
+    let saved = HoldStore(url: paths.holdsFile).load()
+    let f = DateFormatter(); f.dateFormat = "EEE MMM d HH:mm"
+    for h in config.presence {
+        let p = h.pauses
+        let devices = (p.lutron + p.lights + p.rooms + p.zones).joined(separator: ", ")
+        let state = saved[h.name].flatMap { $0 > Date() ? "PAUSED until \(f.string(from: $0))" : nil } ?? "automation running"
+        print("• \(h.name): \(state)  [hold \(Int(h.duration / 60)) min after any of \(h.triggers.count) trigger(s)]\n    pauses: \(devices)")
     }
 
 case "run":

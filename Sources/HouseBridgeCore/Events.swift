@@ -4,6 +4,7 @@ public enum Source: String, Sendable {
     case pico
     case lutronSwitch = "switch"
     case unifi
+    case clock
 }
 
 /// Something that happened in the house. Rules match against these.
@@ -11,6 +12,7 @@ public enum Source: String, Sendable {
 /// - pico:    `input` is the button (on/off/raise/lower/favorite/button_N), `kind` is
 ///            press | release | tap | double_tap | hold | hold_release
 /// - switch:  `input` is "power", `kind` is on | off
+/// - clock:   `input` is the schedule key (e.g. "18:30", "sunset-30"), `kind` is "fire"
 /// - unifi:   `input` is motion | person | vehicle | animal | package | licensePlate | ring | contact | leak ...,
 ///            `kind` is start | end | clear (contact: open | closed)
 public struct TriggerEvent: Sendable {
