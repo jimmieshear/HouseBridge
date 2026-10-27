@@ -20,7 +20,8 @@ BIN="$(swift build -c release --disable-sandbox $ARCHS --show-bin-path)"
 
 APP="HouseBridge.app"
 rm -rf "$APP" HouseBridge.zip
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp "$BIN/HouseBridgeMenu" "$APP/Contents/MacOS/HouseBridge"
 cp "$BIN/housebridgectl"  "$APP/Contents/MacOS/housebridgectl"
 
@@ -31,6 +32,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key><string>local.housebridge</string>
   <key>CFBundleName</key><string>HouseBridge</string>
   <key>CFBundleDisplayName</key><string>HouseBridge</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleExecutable</key><string>HouseBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1</string>
