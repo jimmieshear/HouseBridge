@@ -1,5 +1,7 @@
 # HouseBridge
 
+<img src="Resources/AppIcon-source.png" alt="HouseBridge icon" width="128" align="right">
+
 A native macOS menu bar app and CLI that turns Lutron Caseta Pico remotes and switches and UniFi Protect cameras and sensors into triggers for Philips Hue lights, scenes, and rooms. It can also publish the Protect motion, contact, leak and doorbell sensors to Apple Home as a HomeKit bridge, so it can replace Homebridge for that. It has no VM and no third-party packages. All behavior lives in one YAML file.
 
 ```yaml
