@@ -20,12 +20,13 @@ func usage() -> Never {
       presence             Show each presence hold (which automation is paused, and until when)
       run [--dry-run]      Run the bridge (Ctrl-C to stop). --dry-run logs actions instead of changing lights.
       set-unifi-password   Store the UniFi password in the macOS Keychain (--delete removes it)
+      set-kasa-password    Store the Kasa/TP-Link account password in the macOS Keychain (--delete removes it)
       pair-hue             Pair with the Hue bridge (press its link button first)
       import-homebridge    Read a running Homebridge's config (found over Bonjour and its web UI, or --from-file) and add it to your HouseBridge config
                            (appends the missing unifi:/homekit: sections to an existing config, never overwrites; creates one if absent)
                            [--from-file <config.json>] [--ui <http://host:8581>] [--ui-user <name>] [--out <file>] [--print] [--store-password]
       homekit [--reset]    Show the code for adding HouseBridge to Home.app and who is paired (--reset forgets everything)
-      list lutron|hue|unifi  Show (add --raw to lutron to dump the bridge's raw replies) the devices, buttons, lights, scenes or cameras you can use in rules
+      list lutron|hue|unifi|kasa  Show (add --raw to lutron to dump the bridge's raw replies) the devices, buttons, lights, scenes or cameras you can use in rules
       devices [--brief] [--save]  List every Lutron, Hue and UniFi device: what it reports, what you can do with it, example rules
       diagnose [--save]    Print a report (config, certificates, live connection tests, recent log) to share when something fails
       logs [-n N]          Show the last N lines of the log file (default 80) and its location
@@ -222,6 +223,26 @@ case "set-unifi-password":
         } catch { print("Saved, but the login test failed: \(describeError(error))") }
     } catch { fail("\(describeError(error))") }
 
+case "set-kasa-password":
+    let config = loadConfig()
+    guard let k = config.kasa, let user = k.username else { fail("Add a 'kasa:' section with 'username:' (your Kasa/TP-Link account e-mail) to \(configURL.path) first.") }
+    if rest.contains("--delete") {
+        do {
+            let removed = try Keychain.deletePassword(host: KasaConfig.keychainHost, username: user, service: KasaConfig.keychainService)
+            print(removed ? "Removed the stored password for \(user)." : "Nothing stored for \(user).")
+        } catch { fail("\(error)") }
+        exit(0)
+    }
+    guard let raw = getpass("Kasa/TP-Link password for \(user) (input hidden): ") else { fail("No input.") }
+    let password = String(cString: raw)
+    guard !password.isEmpty else { fail("Empty password; nothing saved.") }
+    do {
+        try Keychain.savePassword(password, host: KasaConfig.keychainHost, username: user, service: KasaConfig.keychainService)
+        print("Saved to the macOS Keychain. You can remove 'password:' / 'password_env:' from the config.")
+        print("Testing the plugs:")
+        for line in await KasaBridge.describe(config: k) { print(line) }
+    } catch { fail("\(describeError(error))") }
+
 case "import-homebridge":
     func note(_ text: String) { FileHandle.standardError.write(Data((text + "\n").utf8)) }
     func ask(_ prompt: String) -> String {
@@ -401,6 +422,10 @@ case "list":
             guard let u = config.unifi else { fail("No 'unifi:' section in config.") }
             let inv = try await ProtectClient(config: u, hosts: KnownHosts(url: paths.knownHostsFile)).discover()
             for item in inv.items { print("  \(item.kind): “\(item.name)”  [\(item.model)]") }
+        case "kasa":
+            guard let k = config.kasa else { fail("No 'kasa:' section in config.") }
+            print("Plugs (use the name after 'device:' in a plug action):")
+            for line in await KasaBridge.describe(config: k) { print(line) }
         default: usage()
         }
     } catch { fail("list \(what) failed: \(describeError(error))\nRun 'housebridgectl diagnose' for connection tests.") }

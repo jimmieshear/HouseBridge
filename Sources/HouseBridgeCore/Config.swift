@@ -6,6 +6,7 @@ public struct Config: Sendable {
     public var lutron: LutronConfig?
     public var hue: HueConfig?
     public var unifi: UnifiConfig?
+    public var kasa: KasaConfig?
     public var homekit: HomeKitConfig?
     /// Where the house is; needed for `sunrise`/`sunset` schedules.
     public var location: GeoLocation?
@@ -48,6 +49,37 @@ public struct UnifiConfig: Sendable {
         if let password, !password.isEmpty { return password }
         if let name = passwordEnv, let value = ProcessInfo.processInfo.environment[name], !value.isEmpty { return value }
         return Keychain.readPassword(host: host, username: username)
+    }
+}
+
+public struct KasaPlug: Sendable {
+    public var name: String
+    public var host: String
+}
+
+public struct KasaConfig: Sendable {
+    /// Kasa/TP-Link account e-mail; only needed by plugs on newer firmware (KLAP). Older plugs need no login.
+    public var username: String?
+    public var password: String?
+    public var passwordEnv: String?
+    public var plugs: [KasaPlug] = []
+
+    public static let keychainService = "housebridge.kasa"
+    public static let keychainHost = "kasa"
+
+    /// Order: `password:` in the file, then the variable named by `password_env:`, then the macOS Keychain (`housebridgectl set-kasa-password`).
+    public func resolvedPassword() -> String? {
+        if let password, !password.isEmpty { return password }
+        if let name = passwordEnv, let value = ProcessInfo.processInfo.environment[name], !value.isEmpty { return value }
+        guard let username else { return nil }
+        return Keychain.readPassword(host: Self.keychainHost, username: username, service: Self.keychainService)
+    }
+
+    /// KLAP credential hashes to try: the account's, then the defaults of a plug with no account.
+    func credentialHashes() -> [Data] {
+        var hashes: [Data] = []
+        if let username, let password = resolvedPassword() { hashes.append(KlapCrypto.authHash(username: username, password: password)) }
+        return hashes + KlapCrypto.fallbackHashes
     }
 }
 
@@ -145,6 +177,8 @@ public enum Action: Sendable {
     case dim(HueTarget, delta: Double, repeatWhileHeld: Bool, intervalMs: Int)
     /// Switches a Lutron switch/dimmer. `offAfterSeconds` (with `on: true`) schedules an off; a new `lutron` action for the same device restarts it.
     case lutron(device: String, on: Bool, offAfterSeconds: Double?)
+    /// Switches a Kasa smart plug; same `offAfterSeconds` behavior as `lutron`.
+    case plug(device: String, on: Bool, offAfterSeconds: Double?)
     case wait(ms: Int)
     case log(String)
 }
@@ -170,7 +204,7 @@ public enum ConfigLoader {
         let root = try YAML.parse(text)
         guard case .map(let top) = root else { throw ConfigError(path: "", message: "top level must be a map") }
         let r = Reader(map: top, path: "")
-        try r.rejectUnknown(["lutron", "hue", "unifi", "homekit", "location", "presence", "timing", "rules"])
+        try r.rejectUnknown(["lutron", "hue", "unifi", "kasa", "homekit", "location", "presence", "timing", "rules"])
 
         var config = Config()
         if let l = try r.reader("lutron") {
@@ -199,6 +233,27 @@ public enum ConfigLoader {
             cfg.passwordEnv = try u.string("password_env")
             cfg.clearAfterSeconds = try u.double("clear_after_seconds") ?? 30
             config.unifi = cfg
+        }
+        if let k = try r.reader("kasa") {
+            try k.rejectUnknown(["username", "password", "password_env", "plugs"])
+            var cfg = KasaConfig()
+            cfg.username = try k.string("username")
+            cfg.password = try k.string("password")
+            cfg.passwordEnv = try k.string("password_env")
+            guard case .array(let items)? = k.map["plugs"], !items.isEmpty else {
+                throw ConfigError(path: k.path + ".plugs", message: "needs a non-empty list, e.g. - { name: Patio Plug, host: 192.168.1.70 }")
+            }
+            for (i, item) in items.enumerated() {
+                guard case .map(let m) = item else { throw ConfigError(path: "\(k.path).plugs[\(i)]", message: "must be a map") }
+                let p = Reader(map: m, path: "\(k.path).plugs[\(i)]")
+                try p.rejectUnknown(["name", "host"])
+                let plug = KasaPlug(name: try p.requireString("name"), host: try p.requireString("host"))
+                guard !cfg.plugs.contains(where: { $0.name.lowercased() == plug.name.lowercased() }) else {
+                    throw ConfigError(path: p.path + ".name", message: "two plugs are named '\(plug.name)'")
+                }
+                cfg.plugs.append(plug)
+            }
+            config.kasa = cfg
         }
         if let h = try r.reader("homekit") {
             try h.rejectUnknown(["name", "port", "setup_code", "smart_detections"])
@@ -319,11 +374,19 @@ public enum ConfigLoader {
                 }
             }
             let usesHue = rule.actions.contains {
-                switch $0 { case .wait, .log, .lutron: false; default: true }
+                switch $0 { case .wait, .log, .lutron, .plug: false; default: true }
             }
             let usesLutronOutput = rule.actions.contains { if case .lutron = $0 { true } else { false } }
             if usesLutronOutput && config.lutron == nil {
                 throw ConfigError(path: "rules", message: "rule '\(rule.name)' controls a Lutron switch but there is no 'lutron:' section")
+            }
+            for case .plug(let device, _, _) in rule.actions {
+                guard let kasa = config.kasa else {
+                    throw ConfigError(path: "rules", message: "rule '\(rule.name)' controls a Kasa plug but there is no 'kasa:' section")
+                }
+                if !kasa.plugs.contains(where: { $0.name.lowercased() == device.lowercased() }) {
+                    throw ConfigError(path: "rules", message: "rule '\(rule.name)' uses plug '\(device)', which is not listed under 'kasa: plugs:' (\(kasa.plugs.map(\.name).joined(separator: ", ")))")
+                }
             }
             if usesHue && config.hue == nil {
                 throw ConfigError(path: "rules", message: "rule '\(rule.name)' controls Hue but there is no 'hue:' section")
@@ -357,13 +420,14 @@ public enum ConfigLoader {
         for (i, raw) in rawPauses.enumerated() {
             guard case .map(let m) = raw else { throw ConfigError(path: "\(r.path).pauses[\(i)]", message: "must be a map") }
             let p = Reader(map: m, path: "\(r.path).pauses[\(i)]")
-            try p.rejectUnknown(["lutron", "light", "room", "zone"])
+            try p.rejectUnknown(["lutron", "plug", "light", "room", "zone"])
             let before = pauses
             pauses.lutron += try p.stringList("lutron")
+            pauses.plugs += try p.stringList("plug")
             pauses.lights += try p.stringList("light")
             pauses.rooms += try p.stringList("room")
             pauses.zones += try p.stringList("zone")
-            if pauses == before { throw ConfigError(path: p.path, message: "needs 'lutron:', 'light:', 'room:' or 'zone:'") }
+            if pauses == before { throw ConfigError(path: p.path, message: "needs 'lutron:', 'plug:', 'light:', 'room:' or 'zone:'") }
         }
         return PresenceHold(name: try r.requireString("name"), triggers: triggers, duration: seconds, pauses: pauses)
     }
@@ -537,6 +601,15 @@ public enum ConfigLoader {
                 guard on else { throw ConfigError(path: r.path + ".off_after_seconds", message: "only makes sense with 'on: true'") }
             }
             return .lutron(device: try r.requireString("switch"), on: on, offAfterSeconds: off)
+        case "plug":
+            try r.rejectUnknown(["action", "device", "on", "off_after_seconds"])
+            let off = try r.double("off_after_seconds")
+            let on = try r.bool("on") ?? true
+            if let off {
+                guard off > 0 else { throw ConfigError(path: r.path + ".off_after_seconds", message: "must be greater than 0") }
+                guard on else { throw ConfigError(path: r.path + ".off_after_seconds", message: "only makes sense with 'on: true'") }
+            }
+            return .plug(device: try r.requireString("device"), on: on, offAfterSeconds: off)
         case "wait":
             try r.rejectUnknown(["action", "ms", "seconds"])
             if let s = try r.double("seconds") { return .wait(ms: Int(s * 1000)) }
@@ -545,7 +618,7 @@ public enum ConfigLoader {
             try r.rejectUnknown(["action", "message"])
             return .log(try r.requireString("message"))
         default:
-            throw ConfigError(path: r.path + ".action", message: "unknown action '\(kind)' (expected light, toggle, scene, cycle_scenes, dim, lutron, wait, log)")
+            throw ConfigError(path: r.path + ".action", message: "unknown action '\(kind)' (expected light, toggle, scene, cycle_scenes, dim, lutron, plug, wait, log)")
         }
     }
 

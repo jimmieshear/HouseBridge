@@ -39,8 +39,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>LSUIElement</key><true/>
+  <key>NSAppTransportSecurity</key>
+  <dict><key>NSAllowsLocalNetworking</key><true/></dict>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>HouseBridge talks to your Lutron, Hue and UniFi devices on the local network.</string>
+  <string>HouseBridge talks to your Lutron, Hue, UniFi and Kasa devices on the local network.</string>
 </dict></plist>
 PLIST
 

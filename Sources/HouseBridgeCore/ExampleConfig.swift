@@ -26,6 +26,14 @@ unifi:
   # password_env: UNIFI_PASSWORD
   clear_after_seconds: 45                 # how long after motion stops before a 'clear' event
 
+# TP-Link Kasa smart plugs, controlled locally. Older firmware needs no login; newer plugs (e.g. KP125M) need your
+# Kasa app account. Store the password with:  housebridgectl set-kasa-password   (check with: housebridgectl list kasa)
+# kasa:
+#   username: you@example.com            # omit if the plug works without an account
+#   plugs:
+#     - { name: Patio Plug, host: 192.168.1.70 }    # give the plug a fixed IP / DHCP reservation
+# ...then in a rule:  - { action: plug, device: Patio Plug, on: true, off_after_seconds: 3600 }
+
 # Publish the UniFi Protect cameras and sensors to Apple Home (motion, contact, leak, doorbell), replacing
 # Homebridge's UniFi Protect plugin for those. No video. Uncomment, then run:  housebridgectl homekit
 # homekit:

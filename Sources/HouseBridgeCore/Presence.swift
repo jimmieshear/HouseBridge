@@ -5,14 +5,15 @@ import Foundation
 /// Devices an automation hold covers. Names are compared, case-insensitively, with the names used in rule actions.
 public struct PauseTargets: Sendable, Equatable {
     public var lutron: [String] = []
+    public var plugs: [String] = []
     public var lights: [String] = []
     public var rooms: [String] = []
     public var zones: [String] = []
-    public var isEmpty: Bool { lutron.isEmpty && lights.isEmpty && rooms.isEmpty && zones.isEmpty }
+    public var isEmpty: Bool { lutron.isEmpty && plugs.isEmpty && lights.isEmpty && rooms.isEmpty && zones.isEmpty }
 
     /// One key per named device, e.g. "light:porch", so "the latest rule per device" can be worked out.
     var keys: [String] {
-        lutron.map { "lutron:" + $0.lowercased() } + lights.map { "light:" + $0.lowercased() }
+        lutron.map { "lutron:" + $0.lowercased() } + plugs.map { "plug:" + $0.lowercased() } + lights.map { "light:" + $0.lowercased() }
             + rooms.map { "room:" + $0.lowercased() } + zones.map { "zone:" + $0.lowercased() }
     }
 
@@ -21,7 +22,7 @@ public struct PauseTargets: Sendable, Equatable {
             let m = Set(mine.map { $0.lowercased() })
             return theirs.contains { m.contains($0.lowercased()) }
         }
-        return hit(lutron, other.lutron) || hit(lights, other.lights) || hit(rooms, other.rooms) || hit(zones, other.zones)
+        return hit(lutron, other.lutron) || hit(plugs, other.plugs) || hit(lights, other.lights) || hit(rooms, other.rooms) || hit(zones, other.zones)
     }
 }
 
@@ -43,6 +44,7 @@ extension Action {
         case .scene(_, let room, let zone, _), .cycleScenes(let room, let zone, _, _):
             return PauseTargets(rooms: room.map { [$0] } ?? [], zones: zone.map { [$0] } ?? [])
         case .lutron(let device, _, _): return PauseTargets(lutron: [device])
+        case .plug(let device, _, _): return PauseTargets(plugs: [device])
         case .wait, .log: return PauseTargets()
         }
     }

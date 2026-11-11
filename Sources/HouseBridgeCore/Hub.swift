@@ -7,7 +7,7 @@ final class ActiveFlag: @unchecked Sendable {
     func turnOff() { lock.withLock { on = false } }
 }
 
-/// Sends `lutron` actions to the Lutron bridge and everything else to Hue.
+/// Sends `lutron` actions to the Lutron bridge, `plug` actions to Kasa and everything else to Hue.
 final class ActionRouter: ActionExecutor, @unchecked Sendable {
     private let hue: ActionExecutor
     private let log: @Sendable (LogEntry) -> Void
@@ -20,7 +20,20 @@ final class ActionRouter: ActionExecutor, @unchecked Sendable {
 
     init(hue: ActionExecutor, log: @escaping @Sendable (LogEntry) -> Void) { self.hue = hue; self.log = log }
 
+    private var _kasa: KasaBridge?
+    var kasa: KasaBridge? {
+        get { lock.withLock { _kasa } }
+        set { lock.withLock { _kasa = newValue } }
+    }
+
     func execute(_ action: Action) async throws {
+        if case .plug(let device, let on, let offAfter) = action {
+            guard let bridge = kasa else {
+                log(LogEntry(category: "dry-run", message: "would run \(action)"))
+                return
+            }
+            return try await bridge.setPlug(device, on: on, offAfter: offAfter)
+        }
         guard case .lutron(let device, let on, let offAfter) = action else { return try await hue.execute(action) }
         guard let bridge = lutron else {
             log(LogEntry(category: "dry-run", message: "would run \(action)"))
@@ -42,6 +55,7 @@ public final class Hub: @unchecked Sendable {
     private let eventSink: @Sendable (TriggerEvent) -> Void
     private var engine: RuleEngine?
     private var homekit: HomeKitBridge?
+    private var kasaBridge: KasaBridge?
     private var tasks: [Task<Void, Never>] = []
     private let active = ActiveFlag()
 
@@ -72,7 +86,7 @@ public final class Hub: @unchecked Sendable {
 
     public func start() {
         let log = logSink
-        log(LogEntry(category: "hub", message: "starting: \(config.rules.count) rule(s), lutron=\(config.lutron != nil), hue=\(config.hue != nil), unifi=\(config.unifi != nil), homekit=\(config.homekit != nil), dryRun=\(dryRun)"))
+        log(LogEntry(category: "hub", message: "starting: \(config.rules.count) rule(s), lutron=\(config.lutron != nil), hue=\(config.hue != nil), unifi=\(config.unifi != nil), kasa=\(config.kasa != nil), homekit=\(config.homekit != nil), dryRun=\(dryRun)"))
         let status = statusSink
 
         // Hue (the output side)
@@ -111,7 +125,8 @@ public final class Hub: @unchecked Sendable {
         // Dry runs must not touch the real hold state.
         let engine = RuleEngine(config: config, executor: router, onEvent: eventSink,
                                 holdStore: dryRun ? nil : HoldStore(url: paths.holdsFile),
-                                cancelLutronTimers: { [weak router] in router?.lutron?.cancelOffTimers(for: $0) }, log: log)
+                                cancelLutronTimers: { [weak router] in router?.lutron?.cancelOffTimers(for: $0) },
+                                cancelPlugTimers: { [weak router] in router?.kasa?.cancelOffTimers(for: $0) }, log: log)
         self.engine = engine
         Task { await engine.start() }
 
@@ -132,6 +147,19 @@ public final class Hub: @unchecked Sendable {
             tasks.append(Task { await bridge.run() })
         } else {
             status(.lutron, .notConfigured)
+        }
+
+        if let kasa = config.kasa {
+            if dryRun {
+                status(.kasa, .connected("dry run"))
+            } else {
+                let bridge = KasaBridge(config: kasa, log: log, status: { status(.kasa, $0) })
+                router.kasa = bridge
+                kasaBridge = bridge
+                tasks.append(Task { await bridge.connect() })
+            }
+        } else {
+            status(.kasa, .notConfigured)
         }
 
         if let hk = config.homekit {
@@ -171,5 +199,7 @@ public final class Hub: @unchecked Sendable {
         engine = nil
         homekit?.stop()
         homekit = nil
+        kasaBridge?.stop()
+        kasaBridge = nil
     }
 }

@@ -72,7 +72,7 @@ public struct LogEntry: Sendable, Identifiable {
     }
 }
 
-public enum Subsystem: String, Sendable, CaseIterable { case lutron, hue, unifi, homekit }
+public enum Subsystem: String, Sendable, CaseIterable { case lutron, hue, unifi, kasa, homekit }
 
 public enum ConnectionStatus: Sendable, Equatable {
     case notConfigured

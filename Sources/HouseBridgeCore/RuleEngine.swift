@@ -113,12 +113,14 @@ public actor RuleEngine {
     private var lightOffTimers: [String: (targets: PauseTargets, task: Task<Void, Never>)] = [:]
     private let holdStore: HoldStore?
     private let cancelLutronTimers: @Sendable ([String]) -> Void
+    private let cancelPlugTimers: @Sendable ([String]) -> Void
     private let now: @Sendable () -> Date
 
     public init(config: Config, executor: ActionExecutor,
                 onEvent: @escaping @Sendable (TriggerEvent) -> Void = { _ in },
                 holdStore: HoldStore? = nil,
                 cancelLutronTimers: @escaping @Sendable ([String]) -> Void = { _ in },
+                cancelPlugTimers: @escaping @Sendable ([String]) -> Void = { _ in },
                 now: @escaping @Sendable () -> Date = { Date() },
                 log: @escaping @Sendable (LogEntry) -> Void) {
         self.config = config
@@ -127,6 +129,7 @@ public actor RuleEngine {
         self.onEvent = onEvent
         self.holdStore = holdStore
         self.cancelLutronTimers = cancelLutronTimers
+        self.cancelPlugTimers = cancelPlugTimers
         self.now = now
         var cont: AsyncStream<TriggerEvent>.Continuation!
         stream = AsyncStream { cont = $0 }
@@ -210,6 +213,7 @@ public actor RuleEngine {
             log(LogEntry(category: "presence", message: "‘\(hold.name)’: automation paused until \(RuleEngine.format(until)); renewed by each new trigger"))
             // A pending 'off in N minutes' is automation too.
             cancelLutronTimers(hold.pauses.lutron)
+            cancelPlugTimers(hold.pauses.plugs)
             for (key, timer) in lightOffTimers where hold.pauses.covers(timer.targets) {
                 timer.task.cancel()
                 lightOffTimers.removeValue(forKey: key)
