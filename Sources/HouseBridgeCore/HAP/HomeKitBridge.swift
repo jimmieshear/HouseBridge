@@ -28,6 +28,8 @@ public final class HomeKitBridge: @unchecked Sendable {
     private let paths: Paths
     private let log: @Sendable (LogEntry) -> Void
     private let status: @Sendable (ConnectionStatus) -> Void
+    private let switchNames: [String]
+    private let onSwitchWrite: @Sendable (String, Bool) -> Void
     private let queue = DispatchQueue(label: "housebridge.homekit")
 
     private var lockDescriptor: Int32 = -1
@@ -35,16 +37,21 @@ public final class HomeKitBridge: @unchecked Sendable {
     private var server: HAPServer?
     private var listener: HAPListener?
     private var routes: [String: HAPRoute] = [:]
+    private var switchKeys: [String: HAPCharKey] = [:]
     private var pendingInventory: [ProtectInventory.Item]?
     private var running = false
 
-    public init(config: HomeKitConfig, paths: Paths,
+    /// `switches` are published as On/Off switches; `onSwitchWrite` is told when Home.app flips one.
+    public init(config: HomeKitConfig, paths: Paths, switches: [String] = [],
+                onSwitchWrite: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
                 log: @escaping @Sendable (LogEntry) -> Void,
                 status: @escaping @Sendable (ConnectionStatus) -> Void) {
         self.config = config
         self.paths = paths
         self.log = log
         self.status = status
+        self.switchNames = switches
+        self.onSwitchWrite = onSwitchWrite
     }
 
     // MARK: Pairing info (for the CLI and menu bar app)
@@ -113,6 +120,11 @@ public final class HomeKitBridge: @unchecked Sendable {
         let server = HAPServer(store: store)
         server.log = { [weak self] message in self?.emit(message) }
         server.onPairingsChanged = { [weak self] in self?.pairingsChanged() }
+        server.onWrite = { [weak self] key, value in
+            guard let self, case .bool(let on) = value,
+                  let name = self.switchNames.first(where: { self.switchKeys[$0.lowercased()] == key }) else { return }
+            self.onSwitchWrite(name, on)
+        }
         self.store = store
         self.server = server
         applyDevices(store.state.devices)
@@ -174,10 +186,18 @@ public final class HomeKitBridge: @unchecked Sendable {
             }
             state.devices = devices
         }
+        store.mutate { state in
+            for name in switchNames where state.aids["switch:" + name.lowercased()] == nil {
+                state.aids["switch:" + name.lowercased()] = state.nextAid
+                state.nextAid += 1
+            }
+        }
         let placed = devices.map { (device: $0, aid: store.state.aids[$0.id] ?? 0) }.sorted { $0.aid < $1.aid }
+        let switches = switchNames.map { (name: $0, aid: store.state.aids["switch:" + $0.lowercased()] ?? 0) }
         let built = HAPLayout.build(bridgeName: config.name, bridgeID: store.state.deviceID, devices: placed,
-                                    smartDetections: config.smartDetections)
+                                    smartDetections: config.smartDetections, switches: switches)
         routes = built.routes
+        switchKeys = built.switches
         server.setAccessories(built.accessories)
         let fingerprint = HAPLayout.fingerprint(built.accessories)
         if fingerprint != store.state.layoutHash {
@@ -221,6 +241,14 @@ public final class HomeKitBridge: @unchecked Sendable {
             case (.button, "start"): server.fireEvent(route.key, value: .int(0))   // 0 = single press
             default: break
             }
+        }
+    }
+
+    /// Reflects the automation's state in Home.app.
+    public func setSwitch(_ name: String, on: Bool) {
+        queue.async {
+            guard self.running, let key = self.switchKeys[name.lowercased()] else { return }
+            self.server?.setValue(key, .bool(on))
         }
     }
 

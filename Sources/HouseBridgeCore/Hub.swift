@@ -44,6 +44,14 @@ final class ActionRouter: ActionExecutor, @unchecked Sendable {
 }
 
 /// Wires the configured sources (Lutron, UniFi) to the rule engine and Hue. One Hub per loaded config.
+/// Lets the rule engine (built first) reach the HomeKit bridge (built after it).
+private final class SwitchRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bridge: HomeKitBridge?
+    func attach(_ bridge: HomeKitBridge?) { lock.lock(); self.bridge = bridge; lock.unlock() }
+    func set(_ name: String, _ on: Bool) { lock.lock(); let b = bridge; lock.unlock(); b?.setSwitch(name, on: on) }
+}
+
 public final class Hub: @unchecked Sendable {
     public let config: Config
     private let paths: Paths
@@ -123,8 +131,10 @@ public final class Hub: @unchecked Sendable {
         var lutronBridge: LutronBridge?
         let router = ActionRouter(hue: executor, log: log)
         // Dry runs must not touch the real hold state.
+        let relay = SwitchRelay()
         let engine = RuleEngine(config: config, executor: router, onEvent: eventSink,
                                 holdStore: dryRun ? nil : HoldStore(url: paths.holdsFile),
+                                onSwitch: { relay.set($0, $1) },
                                 cancelLutronTimers: { [weak router] in router?.lutron?.cancelOffTimers(for: $0) },
                                 cancelPlugTimers: { [weak router] in router?.kasa?.cancelOffTimers(for: $0) }, log: log)
         self.engine = engine
@@ -167,8 +177,11 @@ public final class Hub: @unchecked Sendable {
                 status(.homekit, .notConfigured)
                 log(LogEntry(category: "homekit", message: "HomeKit bridge is not started in dry-run mode"))
             } else {
-                let bridge = HomeKitBridge(config: hk, paths: paths, log: log, status: { status(.homekit, $0) })
+                let bridge = HomeKitBridge(config: hk, paths: paths, switches: config.homekitSwitches,
+                                           onSwitchWrite: { name, on in Task { await engine.setSwitch(name, on: on) } },
+                                           log: log, status: { status(.homekit, $0) })
                 homekit = bridge
+                relay.attach(bridge)
                 bridge.start()
             }
         } else {

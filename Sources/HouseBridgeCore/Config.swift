@@ -14,6 +14,15 @@ public struct Config: Sendable {
     public var timing = Timing()
     public var rules: [Rule] = []
     public init() {}
+
+    /// Distinct `homekit_switch` names of the enabled rules, in config order.
+    public var homekitSwitches: [String] {
+        var seen = Set<String>(), out: [String] = []
+        for rule in rules where rule.enabled {
+            if let name = rule.homekitSwitch, seen.insert(name.lowercased()).inserted { out.append(name) }
+        }
+        return out
+    }
 }
 
 public struct LutronConfig: Sendable {
@@ -98,6 +107,8 @@ public struct Rule: Sendable {
     public var onResume = false
     /// Keeps running while a presence hold is active, even for devices the hold pauses.
     public var ignorePresence = false
+    /// Name of a Home.app switch that mirrors this rule's auto-off lights (on while they are on, off when the timer ends).
+    public var homekitSwitch: String?
     public var actions: [Action]
 }
 
@@ -166,6 +177,14 @@ public struct LightState: Sendable {
     public var transitionMs: Int?
     /// With `on: true`, the engine turns the same target off this long after the last such action.
     public var offAfterSeconds: Double?
+}
+
+extension Action {
+    /// For a `light` action that turns lights on for a limited time: the target and the matching off command.
+    var autoOff: (target: HueTarget, off: Action)? {
+        guard case .light(let target, let state) = self, state.on == true, state.offAfterSeconds != nil else { return nil }
+        return (target, .light(target, LightState(on: false, transitionMs: state.transitionMs)))
+    }
 }
 
 public enum Action: Sendable {
@@ -346,6 +365,15 @@ public enum ConfigLoader {
         if config.homekit != nil && config.unifi == nil {
             throw ConfigError(path: "homekit", message: "publishes UniFi Protect devices to Home.app, so it needs a 'unifi:' section")
         }
+        for rule in config.rules {
+            guard let name = rule.homekitSwitch else { continue }
+            let path = "rules.\(rule.name).homekit_switch"
+            guard config.homekit != nil else { throw ConfigError(path: path, message: "needs a 'homekit:' section") }
+            guard !name.isEmpty, name.count <= 64 else { throw ConfigError(path: path, message: "must be 1-64 characters") }
+            guard rule.actions.contains(where: { $0.autoOff != nil }) else {
+                throw ConfigError(path: path, message: "needs a light action with 'on: true' and 'off_after_seconds', so the switch knows when to turn off")
+            }
+        }
         var seen = Set<String>()
         for hold in config.presence {
             guard seen.insert(hold.name.lowercased()).inserted else { throw ConfigError(path: "presence", message: "two holds are named '\(hold.name)'") }
@@ -495,7 +523,7 @@ public enum ConfigLoader {
     }
 
     private static func parseRule(_ r: Reader) throws -> Rule {
-        try r.rejectUnknown(["name", "enabled", "when", "between", "cooldown_seconds", "on_resume", "ignore_presence", "then"])
+        try r.rejectUnknown(["name", "enabled", "when", "between", "cooldown_seconds", "on_resume", "ignore_presence", "homekit_switch", "then"])
         guard let w = try r.reader("when") else { throw ConfigError(path: r.path, message: "missing 'when'") }
 
         let trigger = try parseTrigger(w)
@@ -522,7 +550,8 @@ public enum ConfigLoader {
         let rule = Rule(name: name, enabled: try r.bool("enabled") ?? true, trigger: trigger, between: window,
                         cooldownSeconds: try r.double("cooldown_seconds") ?? 0,
                         onResume: try r.bool("on_resume") ?? false,
-                        ignorePresence: try r.bool("ignore_presence") ?? false, actions: actions)
+                        ignorePresence: try r.bool("ignore_presence") ?? false,
+                        homekitSwitch: try r.string("homekit_switch"), actions: actions)
         if rule.trigger.source == .pico, rule.actions.contains(where: {
             if case .dim(_, _, true, _) = $0 { return true } else { return false }
         }), !["hold", "press"].contains(rule.trigger.kind) {

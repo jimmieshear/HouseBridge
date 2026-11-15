@@ -68,7 +68,7 @@ struct HAPRoute: Equatable {
 enum HAPLayout {
     // Service and characteristic types (short form of the HomeKit base UUID).
     static let accessoryInformation = "3E", protocolInformation = "A2"
-    static let motionSensor = "85", contactSensor = "80", leakSensor = "83", statelessSwitch = "89"
+    static let switchService = "49", motionSensor = "85", contactSensor = "80", leakSensor = "83", statelessSwitch = "89"
 
     /// Inputs that have their own handling; anything else a camera reports is a smart detection (person, vehicle, ...).
     private static let knownInputs: Set<String> = ["motion", "ring", "contact", "leak", "tamper", "alarm"]
@@ -77,6 +77,8 @@ enum HAPLayout {
         var accessories: [HAPAccessory] = []
         /// Keyed by `"<protect device id>|<input>"`.
         var routes: [String: HAPRoute] = [:]
+        /// Keyed by the lowercased switch name; the On characteristic of that switch.
+        var switches: [String: HAPCharKey] = [:]
     }
 
     private struct IIDs {
@@ -144,7 +146,7 @@ enum HAPLayout {
     }
 
     static func build(bridgeName: String, bridgeID: String, devices: [(device: HAPDevice, aid: Int)],
-                      smartDetections: Bool) -> Built {
+                      smartDetections: Bool, switches: [(name: String, aid: Int)] = []) -> Built {
         var built = Built()
 
         var ids = IIDs()
@@ -175,6 +177,20 @@ enum HAPLayout {
                 for input in device.provides.filter({ !knownInputs.contains($0) }) { add(input, label(input), .motion) }
             }
             built.accessories.append(HAPAccessory(aid: aid, services: services))
+        }
+
+        // Rule switches: on while the automation's lights are on, writable so Home.app can start or stop it.
+        for (name, aid) in switches {
+            var ids = IIDs()
+            let info = information(&ids, name: name, manufacturer: "HouseBridge", model: "Automation Switch",
+                                   serial: "switch-\(aid)", firmware: "1.0")
+            let serviceIID = ids.take()
+            let nameCharacteristic = string(&ids, "23", "Name", name)
+            let on = HAPCharacteristic(iid: ids.take(), type: "25", format: "bool", perms: ["pr", "pw", "ev"],
+                                       description: "On", initial: .bool(false))
+            let service = HAPService(iid: serviceIID, type: switchService, characteristics: [nameCharacteristic, on])
+            built.accessories.append(HAPAccessory(aid: aid, services: [info, service]))
+            built.switches[name.lowercased()] = HAPCharKey(aid: aid, iid: on.iid)
         }
         return built
     }

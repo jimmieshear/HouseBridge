@@ -51,7 +51,8 @@ Each rule has a `when:` trigger and a list of `then:` actions.
 | **Triggers** | `at` (a 24-hour time, `sunrise` or `sunset`; see below), `pico` (button + gesture: `tap`, `double_tap`, `hold`, …), `switch` (on/off), `unifi` (`motion`, `person`, `vehicle`, `package`, … with `start`/`clear`) |
 | **Actions** | `light`, `toggle`, `scene`, `cycle_scenes`, `dim`, `wait`, `log` |
 | **Light timer** | `off_after_seconds` on a `light` action (with `on: true`) turns the same lights off that long after the last such action; new activity restarts it and any later command for those lights cancels it |
-| **Per rule** | `between`, `cooldown_seconds`, `enabled` |
+| **Per rule** | `between`, `cooldown_seconds`, `enabled`, `homekit_switch` |
+| **Home.app switch** | `homekit_switch: Name` on a rule that has a `light` action with `off_after_seconds` publishes a switch to Home.app (needs `homekit:`). It turns on when the rule fires and off when the auto-off timer ends. Turning it on in Home.app runs the rule's actions (ignoring its time window and presence holds), so the same timeout applies; turning it off cancels the timer and switches the lights off. Several rules can share one name |
 
 ### Time of day and sunrise/sunset
 

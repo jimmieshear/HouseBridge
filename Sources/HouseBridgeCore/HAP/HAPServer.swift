@@ -8,6 +8,8 @@ final class HAPServer {
     var log: (String) -> Void = { _ in }
     /// Called when pairings change, so the Bonjour record (`sf`) can be refreshed.
     var onPairingsChanged: () -> Void = {}
+    /// Called when a controller writes a value (not for Identify); the value is already stored.
+    var onWrite: (HAPCharKey, HAPValue) -> Void = { _, _ in }
 
     private(set) var accessories: [HAPAccessory] = []
     private var characteristics: [HAPCharKey: HAPCharacteristic] = [:]
@@ -355,6 +357,11 @@ final class HAPConnection {
         return .json(["characteristics": entries], status: failed ? 207 : 200)
     }
 
+    private static func boolValue(_ raw: Any?) -> Bool? {
+        if let n = raw as? NSNumber { return n.boolValue }   // HomeKit sends true/false or 1/0
+        return nil
+    }
+
     private func writeCharacteristics(_ body: Data) -> HAPResponse {
         guard let root = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
               let items = root["characteristics"] as? [[String: Any]] else {
@@ -376,6 +383,11 @@ final class HAPConnection {
                 if status == HAPStatus.ok, item["value"] != nil {
                     if c.type == "14", c.writable { server.log("identify requested by \(controllerID ?? "?")") }
                     else if !c.writable { status = HAPStatus.writeToReadOnly }
+                    else if c.format == "bool", let on = Self.boolValue(item["value"]) {
+                        let value = HAPValue.bool(on)
+                        server.setValue(key, value)
+                        server.onWrite(key, value)
+                    }
                 }
             } else {
                 status = HAPStatus.resourceDoesNotExist

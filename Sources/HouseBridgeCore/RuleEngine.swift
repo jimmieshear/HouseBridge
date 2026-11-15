@@ -110,7 +110,9 @@ public actor RuleEngine {
     private var holdUntil: [String: Date] = [:]
     private var holdTimers: [String: Task<Void, Never>] = [:]
     /// Pending `off_after_seconds` timers for Hue lights, by target. A later action on the same target replaces or cancels it.
-    private var lightOffTimers: [String: (targets: PauseTargets, task: Task<Void, Never>)] = [:]
+    /// `switchName` is the Home.app switch to flip off when the timer ends or is cancelled; `off` is the command that ends it.
+    private var lightOffTimers: [String: (targets: PauseTargets, task: Task<Void, Never>, switchName: String?, off: Action)] = [:]
+    private let onSwitch: @Sendable (String, Bool) -> Void
     private let holdStore: HoldStore?
     private let cancelLutronTimers: @Sendable ([String]) -> Void
     private let cancelPlugTimers: @Sendable ([String]) -> Void
@@ -119,6 +121,7 @@ public actor RuleEngine {
     public init(config: Config, executor: ActionExecutor,
                 onEvent: @escaping @Sendable (TriggerEvent) -> Void = { _ in },
                 holdStore: HoldStore? = nil,
+                onSwitch: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
                 cancelLutronTimers: @escaping @Sendable ([String]) -> Void = { _ in },
                 cancelPlugTimers: @escaping @Sendable ([String]) -> Void = { _ in },
                 now: @escaping @Sendable () -> Date = { Date() },
@@ -128,6 +131,7 @@ public actor RuleEngine {
         self.log = log
         self.onEvent = onEvent
         self.holdStore = holdStore
+        self.onSwitch = onSwitch
         self.cancelLutronTimers = cancelLutronTimers
         self.cancelPlugTimers = cancelPlugTimers
         self.now = now
@@ -217,6 +221,7 @@ public actor RuleEngine {
             for (key, timer) in lightOffTimers where hold.pauses.covers(timer.targets) {
                 timer.task.cancel()
                 lightOffTimers.removeValue(forKey: key)
+                if let name = timer.switchName { onSwitch(name, false) }
             }
         }
         scheduleResume(hold, at: until)
@@ -350,15 +355,18 @@ public actor RuleEngine {
         }
         lastFired[rule.name] = Date()
         log(LogEntry(category: "rules", message: "‘\(rule.name)’ fired by \(event.summary)"))
+        run(rule, holdKey: event.key)
+    }
 
+    /// Settles the auto-off timers, then runs the actions in the background.
+    private func run(_ rule: Rule, holdKey: String) {
         let executor = self.executor
         let log = self.log
         let actions = rule.actions
         let name = rule.name
-        let holdKey = event.key
 
         // Timers are settled here, in order, not inside the task: two rules firing together must not race.
-        for action in actions { prepareLightTimer(for: action); armLightTimer(for: action, rule: name) }
+        for action in actions { prepareLightTimer(for: action, keeping: rule.homekitSwitch); armLightTimer(for: action, rule: rule) }
 
         let task = Task { [weak self] in
             for action in actions {
@@ -378,34 +386,68 @@ public actor RuleEngine {
         _ = task
     }
 
+    // MARK: Home.app switches
+
+    /// Home.app flipped a switch. On runs the first enabled rule that names it (ignoring its trigger, time window,
+    /// cooldown and presence holds, since a person asked), so its `off_after_seconds` applies. Off ends the lights now.
+    public func setSwitch(_ name: String, on: Bool) {
+        let rules = config.rules.filter { $0.enabled && $0.homekitSwitch?.lowercased() == name.lowercased() }
+        guard let rule = rules.first else { return }
+        if on {
+            log(LogEntry(category: "rules", message: "‘\(rule.name)’ started from Home.app switch ‘\(name)’"))
+            run(rule, holdKey: "homekit:\(name)")
+            onSwitch(name, true)
+        } else {
+            log(LogEntry(category: "rules", message: "Home.app switch ‘\(name)’ turned off"))
+            for (key, timer) in lightOffTimers where timer.switchName?.lowercased() == name.lowercased() {
+                timer.task.cancel()
+                lightOffTimers.removeValue(forKey: key)
+            }
+            let executor = self.executor, log = self.log
+            let offs = rules.flatMap(\.actions).compactMap { $0.autoOff?.off }
+            Task {
+                for off in offs {
+                    do { try await executor.execute(off) }
+                    catch { log(LogEntry(level: .error, category: "rules", message: "switch ‘\(name)’ off failed: \(error)")) }
+                }
+            }
+            onSwitch(name, false)
+        }
+    }
+
     private static func lightKey(_ t: HueTarget) -> String {
         ["light": t.lights, "room": t.rooms, "zone": t.zones]
             .flatMap { kind, names in names.map { "\(kind):\($0.lowercased())" } }.sorted().joined(separator: ",")
     }
 
-    /// Any new command for a light target supersedes its pending auto-off.
-    private func prepareLightTimer(for action: Action) {
-        guard case .light(let target, _) = action else { return }
-        lightOffTimers.removeValue(forKey: RuleEngine.lightKey(target))?.task.cancel()
+    /// Any new command for a light target supersedes its pending auto-off. A switch whose timer is dropped this way
+    /// goes off, unless the new command re-arms the same switch.
+    private func prepareLightTimer(for action: Action, keeping switchName: String?) {
+        guard case .light(let target, _) = action,
+              let old = lightOffTimers.removeValue(forKey: RuleEngine.lightKey(target)) else { return }
+        old.task.cancel()
+        if let name = old.switchName, !(action.autoOff != nil && switchName?.lowercased() == name.lowercased()) { onSwitch(name, false) }
     }
 
     /// `off_after_seconds` on a `light` action: turn the same lights off after that long, unless re-armed first.
-    private func armLightTimer(for action: Action, rule: String) {
-        guard case .light(let target, let state) = action, state.on == true, let seconds = state.offAfterSeconds else { return }
+    private func armLightTimer(for action: Action, rule: Rule) {
+        guard case .light(let target, let state) = action, let seconds = state.offAfterSeconds, let (_, off) = action.autoOff else { return }
         let key = RuleEngine.lightKey(target)
-        let executor = self.executor, log = self.log
-        let off = Action.light(target, LightState(on: false, transitionMs: state.transitionMs))
+        let executor = self.executor, log = self.log, name = rule.name, switchName = rule.homekitSwitch
         let task = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             await self?.lightTimerFired(key)
             do { try await executor.execute(off) }
-            catch { log(LogEntry(level: .error, category: "rules", message: "‘\(rule)’ auto-off failed: \(error)")) }
+            catch { log(LogEntry(level: .error, category: "rules", message: "‘\(name)’ auto-off failed: \(error)")) }
         }
-        lightOffTimers[key] = (PauseTargets(lights: target.lights, rooms: target.rooms, zones: target.zones), task)
+        lightOffTimers[key] = (PauseTargets(lights: target.lights, rooms: target.rooms, zones: target.zones), task, switchName, off)
+        if let switchName { onSwitch(switchName, true) }
     }
 
-    private func lightTimerFired(_ key: String) { lightOffTimers.removeValue(forKey: key) }
+    private func lightTimerFired(_ key: String) {
+        if let name = lightOffTimers.removeValue(forKey: key)?.switchName { onSwitch(name, false) }
+    }
 
     private func startRepeating(key: String, action: Action, intervalMs: Int, executor: ActionExecutor,
                                 log: @escaping @Sendable (LogEntry) -> Void, rule: String) {
