@@ -124,6 +124,29 @@ holidays:
 
 On each evening of the range, at the start of `between`, every Hue light that supports color (the bridge reports this; white-only lights are left alone) is switched on in the next palette color, going through the lights in name order so a light keeps its color from night to night. At the end of the window the same lights are switched off and reset to `normal_color_temp_kelvin`, so they are not still green the next time someone turns them on. It is skipped while any `presence:` hold is active, and starts later in the evening if the hold ends before the window does. If someone is home at the end, the lights are only reset to white, not switched off. A missed end (Mac asleep or restarted) is carried out for up to an hour afterwards. `housebridgectl schedule` shows the next evening for each holiday.
 
+### Alarm
+
+```yaml
+alarms:
+  - name: Intruder alert
+    when:                                   # a camera and a smart detection: person, vehicle, animal, ...
+      - { unifi: Front Camera, event: person }
+    keep_seconds: 30                        # ends this long after the last detection ends (default 30)
+    # max_minutes: 10                       # ...or this long after the last notification if a detection never reports its end
+    lights:
+      except_rooms: [Guest Bedroom 2, Master Bedroom]
+      lutron: [Garage Wall Lights]          # Lutron switches to turn on as well (optional)
+      # brightness: 100
+    accent:                                 # these lights change color for the duration (default red)
+      lights: [Hue outdoor wall 1]
+      color: "#FF0000"
+    sound: { start: Dog Barking, stop: Stop Dog Barking }   # macOS Shortcuts, optional
+```
+
+"Person" is UniFi Protect's own on-camera smart detection (AI classification on the camera, so it needs a camera that supports smart detections); `housebridgectl events` shows what each camera reports. The first `person` start begins the alarm; every further start (any listed camera) or end restarts the countdown, and while a detection is still in view (started, not yet ended) the alarm stays on. It does not start while any `presence:` hold is active, but a hold that begins during an alarm does not cancel it. On start, every Hue light in a room that is **off** is switched on (rooms in `except_rooms` are never touched) and the accent lights take the color; the `lutron:` switches go on too (which also cancels any pending auto-off on them). At the end the lights the alarm switched on go off again, Hue lights that were already on are left alone, the `lutron:` switches are always switched off (their own motion rules would do the same a few minutes later), and the accent lights go back to white (and off if they were off). Stopping or reloading HouseBridge ends a running alarm. In `--dry-run` nothing runs a Shortcut.
+
+**Sound on the HomePods.** HouseBridge can't talk to HomePods itself, so it runs two Shortcuts with `shortcuts run`. In the Shortcuts app create *Dog Barking*: **Set Playback Destination** → your HomePods, then **Repeat** (say 200 times) → **Play Sound** (a barking audio file, set to wait until finished). Create *Stop Dog Barking* with **Stop Playing** (and, if needed, the same Set Playback Destination first). Try them with `shortcuts run "Dog Barking"` in Terminal. Shortcuts run as the logged-in user, so the Mac must be signed in. Omit `sound:` for lights only.
+
 Run `housebridgectl devices` for a catalog of what each device reports, what it can do, and example rules to paste in.
 
 ## HomeKit bridge

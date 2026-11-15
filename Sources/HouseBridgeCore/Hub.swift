@@ -20,6 +20,13 @@ final class ActionRouter: ActionExecutor, @unchecked Sendable {
 
     init(hue: ActionExecutor, log: @escaping @Sendable (LogEntry) -> Void) { self.hue = hue; self.log = log }
 
+    /// nil in dry-run, so a rehearsal never starts a Shortcut.
+    var shortcuts: ShortcutRunner? {
+        get { lock.withLock { _shortcuts } }
+        set { lock.withLock { _shortcuts = newValue } }
+    }
+    private var _shortcuts: ShortcutRunner?
+
     private var _kasa: KasaBridge?
     var kasa: KasaBridge? {
         get { lock.withLock { _kasa } }
@@ -27,6 +34,17 @@ final class ActionRouter: ActionExecutor, @unchecked Sendable {
     }
 
     func execute(_ action: Action) async throws {
+        switch action {
+        case .alarm(.lutron(let device, let on)):
+            return try await execute(.lutron(device: device, on: on, offAfterSeconds: nil))
+        case .alarm(.soundStart(let name)):
+            guard let runner = shortcuts else { log(LogEntry(category: "dry-run", message: "would run Shortcut ‘\(name)’")); return }
+            return try runner.start(name)
+        case .alarm(.soundStop(let started, let stop)):
+            guard let runner = shortcuts else { log(LogEntry(category: "dry-run", message: "would stop Shortcut ‘\(started)’")); return }
+            return await runner.stop(started: started, stop: stop)
+        default: break
+        }
         if case .plug(let device, let on, let offAfter) = action {
             guard let bridge = kasa else {
                 log(LogEntry(category: "dry-run", message: "would run \(action)"))
@@ -130,6 +148,7 @@ public final class Hub: @unchecked Sendable {
         // Lutron (input, and output for `lutron` actions)
         var lutronBridge: LutronBridge?
         let router = ActionRouter(hue: executor, log: log)
+        if !dryRun { router.shortcuts = ShortcutRunner(log: log) }
         // Dry runs must not touch the real hold state.
         let relay = SwitchRelay()
         let engine = RuleEngine(config: config, executor: router, onEvent: eventSink,

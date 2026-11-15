@@ -3,6 +3,9 @@ import Foundation
 /// Executes rule actions against a Hue bridge.
 public final class HueActions: ActionExecutor, @unchecked Sendable {
     private let client: HueClient
+    private let alarmLock = NSLock()
+    /// What the running alarm changed, so ending it undoes exactly that: lights it switched on, and each accent light's prior power state.
+    private var alarmRestore: (switchedOn: Set<String>, accent: [String: Bool]) = ([], [:])
     private let cycleLock = NSLock()
     private var lastCycled: [String: String] = [:]   // group → scene we last recalled (fallback when the bridge reports none active)
 
@@ -43,6 +46,8 @@ public final class HueActions: ActionExecutor, @unchecked Sendable {
             for (type, id) in try await resolve(target) { try await put(type, id, body) }
         case .holiday(let step):
             try await holiday(step)
+        case .alarm(let step):
+            try await alarm(step)
         case .wait, .log, .lutron, .plug:
             break
         }
@@ -70,6 +75,74 @@ public final class HueActions: ActionExecutor, @unchecked Sendable {
             } catch { firstError = firstError ?? error }
         }
         if let firstError { throw firstError }
+    }
+
+    /// The Hue half of an alarm. Only lights that are off are switched on (lights already on are left as they are, and so
+    /// are not switched off afterwards); rooms in `exceptRooms` are never touched. Every light is tried and the first
+    /// failure is rethrown afterwards, so one unreachable bulb can't stop the rest.
+    private func alarm(_ step: AlarmStep) async throws {
+        switch step {
+        case .lutron, .soundStart, .soundStop:
+            return   // handled by the router
+        case .start(let except, let accent, let color, let brightness):
+            let inv = try await client.inventory(refresh: true)
+            var isOn: [String: Bool] = [:]
+            for l in try await client.request("GET", "/resource/light") {
+                if let id = l["id"] as? String { isOn[id] = ((l["on"] as? JSON)?["on"] as? Bool) ?? false }
+            }
+            let skipped = Set(except.map { $0.lowercased() })
+            let unknown = except.filter { name in !inv.rooms.contains { $0.name.lowercased() == name.lowercased() } }
+            var firstError: Error? = unknown.first.map { HueError.notFound(kind: "room", name: $0, available: inv.rooms.map(\.name)) }
+
+            var wanted: [String] = []
+            for room in inv.rooms where !skipped.contains(room.name.lowercased()) {
+                for id in room.lightIds where !wanted.contains(id) { wanted.append(id) }
+            }
+            var switchedOn = Set<String>()
+            for id in wanted where isOn[id] == false {
+                do {
+                    try await put("light", id, ["on": ["on": true], "dimming": ["brightness": min(100, max(1, brightness))]])
+                    switchedOn.insert(id)
+                } catch { firstError = firstError ?? error }
+            }
+            // The accent lights last, so a light that is in a room ends up with the accent color.
+            var priorPower: [String: Bool] = [:]
+            for name in accent {
+                guard let light = inv.lights.first(where: { $0.name.lowercased() == name.lowercased() }) else {
+                    firstError = firstError ?? HueError.notFound(kind: "light", name: name, available: inv.lights.map(\.name))
+                    continue
+                }
+                priorPower[light.id] = isOn[light.id] ?? false
+                var state = LightState()
+                state.on = true; state.brightness = 100; state.colorHex = color
+                do { try await put("light", light.id, HueActions.body(for: state)) } catch { firstError = firstError ?? error }
+            }
+            alarmLock.withLock {
+                alarmRestore.switchedOn.formUnion(switchedOn)
+                // Keep the first remembered power state if an alarm is restarted before it ended.
+                alarmRestore.accent.merge(priorPower) { old, _ in old }
+            }
+            if let firstError { throw firstError }
+        case .end(let accent, let kelvin):
+            let restore = alarmLock.withLock { () -> (Set<String>, [String: Bool]) in
+                defer { alarmRestore = ([], [:]) }
+                return alarmRestore
+            }
+            var firstError: Error?
+            for id in restore.0.sorted() {
+                do { try await put("light", id, ["on": ["on": false]]) } catch { firstError = firstError ?? error }
+            }
+            let inv = try await client.inventory()
+            for name in accent {
+                guard let light = inv.lights.first(where: { $0.name.lowercased() == name.lowercased() }) else { continue }
+                do {
+                    // Off again if the alarm switched it on. The color is reset in a separate call so it isn't left red for next time.
+                    if restore.1[light.id] == false { try await put("light", light.id, ["on": ["on": false]]) }
+                    try await put("light", light.id, ["color_temperature": ["mirek": min(500, max(153, 1_000_000 / max(kelvin, 1)))]])
+                } catch { firstError = firstError ?? error }
+            }
+            if let firstError { throw firstError }
+        }
     }
 
     /// Picks the scene to move to. `current` nil (nothing active) starts at the first scene going forward, the last going back.

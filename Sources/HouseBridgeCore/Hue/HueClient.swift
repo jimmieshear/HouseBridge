@@ -31,6 +31,8 @@ public struct HueInventory: Sendable {
         public var details: [String] = []
         public var product: String = ""
         public var supportsColor = false
+        /// For rooms and zones: ids of the lights inside.
+        public var lightIds: [String] = []
     }
     public struct SceneItem: Sendable { public let id: String; public let name: String; public let groupName: String? }
     public var lights: [Item] = []
@@ -136,11 +138,11 @@ public final class HueClient: @unchecked Sendable {
                 products[id] = [pd["manufacturer_name"] as? String, pd["product_name"] as? String].compactMap { $0 }.joined(separator: " ")
             }
         }
-        var lightNameById: [String: String] = [:], lightNameByOwner: [String: String] = [:]
+        var lightNameById: [String: String] = [:], lightNameByOwner: [String: String] = [:], lightIdByOwner: [String: String] = [:]
         for l in lights {
             guard let id = l["id"] as? String, let n = (l["metadata"] as? JSON)?["name"] as? String else { continue }
             lightNameById[id] = n
-            if let owner = (l["owner"] as? JSON)?["rid"] as? String { lightNameByOwner[owner] = n }
+            if let owner = (l["owner"] as? JSON)?["rid"] as? String { lightNameByOwner[owner] = n; lightIdByOwner[owner] = id }
         }
         func capabilities(_ l: JSON) -> [String] {
             var c = ["on / off"]
@@ -173,6 +175,9 @@ public final class HueClient: @unchecked Sendable {
             guard let id = r["id"] as? String, let n = (r["metadata"] as? JSON)?["name"] as? String else { return nil }
             var item = HueInventory.Item(id: id, name: n, groupedLightId: groupedLight(r))
             item.details = ["lights: " + (members(r).joined(separator: ", ").isEmpty ? "none" : members(r).joined(separator: ", "))]
+            item.lightIds = ((r["children"] as? [JSON]) ?? []).compactMap { c in
+                (c["rid"] as? String).flatMap { lightNameById[$0] != nil ? $0 : lightIdByOwner[$0] }
+            }
             return item
         }
         inv.zones = zones.compactMap { z in

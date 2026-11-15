@@ -108,6 +108,16 @@ public actor RuleEngine {
     private var runner: Task<Void, Never>?
     private var simulators: [Task<Void, Never>] = []
     private var holidayTask: Task<Void, Never>?
+    private struct AlarmState {
+        var active = false
+        /// Detections that have started and not yet ended (a person still in view).
+        var present = Set<String>()
+        var last = Date.distantPast
+        var timer: Task<Void, Never>?
+        /// Alarm actions run one after another, so an end can't overtake a start that came just before it.
+        var chain: Task<Void, Never>?
+    }
+    private var alarmStates: [String: AlarmState] = [:]
     /// When each presence hold ends (only entries still in the future matter).
     private var holdUntil: [String: Date] = [:]
     private var holdTimers: [String: Task<Void, Never>] = [:]
@@ -174,6 +184,12 @@ public actor RuleEngine {
         simulators = []
         holidayTask?.cancel()
         holidayTask = nil
+        // A reload or quit must not leave the sound playing and the lights on with nothing left to end them.
+        for alarm in config.alarms where alarmStates[alarm.name]?.active == true {
+            alarmStates[alarm.name]?.timer?.cancel()
+            alarmStates[alarm.name]?.active = false
+            queue(alarm.endSteps, for: alarm)
+        }
         lightOffTimers.values.forEach { $0.task.cancel() }
         lightOffTimers = [:]
         repeaters.values.forEach { $0.cancel() }
@@ -201,9 +217,71 @@ public actor RuleEngine {
         for hold in config.presence where hold.triggers.contains(where: { $0.matches(event) }) {
             extend(hold)
         }
+        for alarm in config.alarms where alarm.enabled && alarm.matches(event) { alarmEvent(alarm, event) }
         for rule in config.rules where rule.enabled && rule.trigger.matches(event) {
             fire(rule, for: event)
         }
+    }
+
+    // MARK: Alarms
+
+    /// A person detection starts the alarm (unless someone is home) or, once it is running, keeps it going. It ends
+    /// `keepSeconds` after the last notification, or `maxSeconds` after it while a detection never reported its end.
+    /// A hold that begins *during* an alarm does not stop it: a stranger at the door is what starts those holds.
+    private func alarmEvent(_ alarm: Alarm, _ event: TriggerEvent) {
+        var state = alarmStates[alarm.name] ?? AlarmState()
+        if !state.active {
+            guard event.kind == "start" else { return }
+            if anyHoldActive {
+                log(LogEntry(category: "alarm", message: "‘\(alarm.name)’ not started: someone is home (\(event.summary))"))
+                return
+            }
+            state.active = true
+            state.present = []
+            alarmStates[alarm.name] = state
+            log(LogEntry(category: "alarm", message: "‘\(alarm.name)’ STARTED by \(event.summary)"))
+            queue(alarm.startSteps, for: alarm)
+            state = alarmStates[alarm.name] ?? state
+        }
+        if event.kind == "start" { state.present.insert(event.key) } else { state.present.remove(event.key) }
+        state.last = now()
+        state.timer?.cancel()
+        let name = alarm.name
+        state.timer = Task { [weak self] in
+            // Re-check after waking: Mac sleep or a later notification moves the deadline.
+            while let remaining = await self?.alarmRemaining(name), remaining > 0 {
+                try? await Task.sleep(for: .seconds(min(remaining, 60) + 0.05))
+                if Task.isCancelled { return }
+            }
+            await self?.endAlarm(name)
+        }
+        alarmStates[alarm.name] = state
+    }
+
+    private func alarmRemaining(_ name: String) -> TimeInterval? {
+        guard let alarm = config.alarms.first(where: { $0.name == name }), let state = alarmStates[name], state.active else { return nil }
+        return state.last.addingTimeInterval(state.present.isEmpty ? alarm.keepSeconds : alarm.maxSeconds).timeIntervalSince(now())
+    }
+
+    /// Visible for tests.
+    func endAlarm(_ name: String) {
+        guard let alarm = config.alarms.first(where: { $0.name == name }), alarmStates[name]?.active == true else { return }
+        alarmStates[name]?.active = false
+        alarmStates[name]?.timer = nil
+        log(LogEntry(category: "alarm", message: "‘\(name)’ ended"))
+        queue(alarm.endSteps, for: alarm)
+    }
+
+    private func queue(_ steps: [AlarmStep], for alarm: Alarm) {
+        let executor = self.executor, log = self.log, previous = alarmStates[alarm.name]?.chain, name = alarm.name
+        let task = Task {
+            await previous?.value
+            for step in steps {
+                do { try await RuleEngine.run(.alarm(step), executor: executor, log: log) }
+                catch { log(LogEntry(level: .error, category: "alarm", message: "‘\(name)’ step failed: \(error)")) }
+            }
+        }
+        alarmStates[alarm.name, default: AlarmState()].chain = task
     }
 
     // MARK: Presence holds
