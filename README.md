@@ -91,6 +91,39 @@ presence:
 
 While a hold is active, rules triggered by a sensor, the clock or a Lutron switch that act on a listed device are skipped (logged as "paused by …"), so people can use those lights by hand. Pico button presses are never paused, and a rule with `ignore_presence: true` keeps running during a hold. Every new trigger restarts the clock, so the hold ends only after a full `hold_hours` with no trigger; automation then resumes on its own. A pending `off_after_seconds` on a paused Lutron switch is cancelled when the hold starts. The end time is saved in `holds.json`, so reloads and restarts don't cut a hold short. `housebridgectl presence` shows what is paused and until when. **When a hold ends**, each paused device is put where the schedule would have it right now: for every listed device, the most recent time-of-day (`at:`) rule that targets it, respecting `days` and `between`, is run once. For example, if the hold ends at 9pm and the rules are sunset → on, 23:00 → off, sunrise → off, the light turns on; at 2am it turns off. Add `on_resume: true` to any other rule (say, one that turns a Lutron switch back on whenever it is switched off) to run it too at that moment. Sensor-triggered rules are not replayed; they act on the next event. If HouseBridge was not running when a hold ended, this happens at the next start.
 
+### Looking lived in while nobody is home
+
+```yaml
+simulate:
+  - name: Kids' rooms look lived in
+    between: [sunset, "23:30"]      # the evening window; may wrap midnight, e.g. ["21:00", "01:00"]
+    nights: { weekday: 30, weekend: 80 }   # % of nights that are active; weekend defaults to Fri, Sat, Sun evenings
+    sessions: [1, 3]                # lights-on stretches on an active night (a number or [min, max])
+    minutes: [20, 90]               # how long each stays on
+    lights:                         # one is picked per session; light:/room:/zone: plus brightness, color…
+      - { room: Bedroom 1, brightness: 45 }
+      - { room: Bedroom 2, brightness: 45 }
+```
+
+Each evening, HouseBridge decides whether it is an active night (using the percentages), then picks that many random start times inside the window, a random room for each, and turns it on for a random length (the light's `off_after_seconds`). Plans are repeatable per night (seeded from the name and date), so restarting or reloading the config doesn't reroll tonight, and a session already under way is picked up for its remaining time. `weekend_days: [fri, sat, sun]` changes which evenings count as weekend; `enabled: false` turns it off. `nights` defaults to 40% / 70%, `sessions` to 1–3, `minutes` to 15–90.
+
+It follows the presence rules: list the same rooms under a `presence:` hold's `pauses:` and sessions are skipped while the hold is active (and lights already on from a session go off when someone arrives, as for any `off_after_seconds`). With `hold_hours: 24` it starts again a day after the last sign of someone home. `housebridgectl schedule` prints the planned sessions for the next 7 days.
+
+### Holiday colors
+
+```yaml
+holidays:
+  - name: Independence Day
+    from: "07-03"            # month-day; `to:` defaults to `from`, and a range may wrap the year (12-28 to 01-02)
+    to: "07-04"
+    colors: ["#FF0000", "#FFFFFF", "#0000FF"]
+    # brightness: 80                      # default 80
+    # between: [sunset-30, "23:00"]       # default; needs `location:`
+    # normal_color_temp_kelvin: 2700      # white the lights are reset to at the end (default 2700)
+```
+
+On each evening of the range, at the start of `between`, every Hue light that supports color (the bridge reports this; white-only lights are left alone) is switched on in the next palette color, going through the lights in name order so a light keeps its color from night to night. At the end of the window the same lights are switched off and reset to `normal_color_temp_kelvin`, so they are not still green the next time someone turns them on. It is skipped while any `presence:` hold is active, and starts later in the evening if the hold ends before the window does. If someone is home at the end, the lights are only reset to white, not switched off. A missed end (Mac asleep or restarted) is carried out for up to an hour afterwards. `housebridgectl schedule` shows the next evening for each holiday.
+
 Run `housebridgectl devices` for a catalog of what each device reports, what it can do, and example rules to paste in.
 
 ## HomeKit bridge

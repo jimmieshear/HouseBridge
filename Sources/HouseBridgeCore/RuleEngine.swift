@@ -106,6 +106,8 @@ public actor RuleEngine {
     private var repeaters: [String: Task<Void, Never>] = [:]
     private var clearTasks: [String: Task<Void, Never>] = [:]
     private var runner: Task<Void, Never>?
+    private var simulators: [Task<Void, Never>] = []
+    private var holidayTask: Task<Void, Never>?
     /// When each presence hold ends (only entries still in the future matter).
     private var holdUntil: [String: Date] = [:]
     private var holdTimers: [String: Task<Void, Never>] = [:]
@@ -148,6 +150,10 @@ public actor RuleEngine {
     public func start() {
         guard runner == nil else { return }
         restoreHolds()
+        if config.holidays.contains(where: \.enabled) { holidayTask = Task { [weak self] in await self?.runHolidays() } }
+        for sim in config.simulations where sim.enabled {
+            simulators.append(Task { [weak self] in await self?.simulate(sim) })
+        }
         let cont = continuation
         detector = GestureDetector(holdMs: config.timing.holdMs, doubleTapMs: config.timing.doubleTapMs) { cont.yield($0) }
         runner = Task { [weak self] in
@@ -164,6 +170,10 @@ public actor RuleEngine {
         runner = nil
         holdTimers.values.forEach { $0.cancel() }
         holdTimers = [:]
+        simulators.forEach { $0.cancel() }
+        simulators = []
+        holidayTask?.cancel()
+        holidayTask = nil
         lightOffTimers.values.forEach { $0.task.cancel() }
         lightOffTimers = [:]
         repeaters.values.forEach { $0.cancel() }
@@ -384,6 +394,109 @@ public actor RuleEngine {
             }
         }
         _ = task
+    }
+
+    // MARK: Holiday themes
+
+    private var anyHoldActive: Bool { holdUntil.values.contains { $0 > now() } }
+
+    /// How long after a window ends a missed end step (app asleep or restarted) is still carried out.
+    private static let holidayEndGrace: TimeInterval = 3600
+
+    /// Steps that are due at `date` and not in `done`. A start is due from the window's start until its end (so a restart
+    /// mid-evening re-applies the colors); an end from the window's end until an hour later. Visible for tests.
+    func dueHolidaySteps(at date: Date, done: Set<String>) -> [(key: String, holiday: Holiday, step: HolidayStep)] {
+        var out: [(String, Holiday, HolidayStep)] = []
+        for h in config.holidays where h.enabled {
+            for (start, end) in h.upcoming(after: date.addingTimeInterval(-RuleEngine.holidayEndGrace), location: config.location, days: 3) {
+                let stamp = Int(start.timeIntervalSince1970)
+                if start <= date, date < end, !done.contains("\(h.name)|\(stamp)|start") {
+                    out.append(("\(h.name)|\(stamp)|start", h, .start(colors: h.colors, brightness: h.brightness)))
+                }
+                if end <= date, date < end.addingTimeInterval(RuleEngine.holidayEndGrace), !done.contains("\(h.name)|\(stamp)|end") {
+                    // With someone home the lights may be in use: only the color is reset.
+                    out.append(("\(h.name)|\(stamp)|end", h, .end(kelvin: h.normalKelvin, turnOff: !anyHoldActive)))
+                }
+            }
+        }
+        return out
+    }
+
+    /// The next moment a holiday step could become due, for sleeping.
+    private func nextHolidayMoment(after date: Date) -> Date? {
+        config.holidays.filter(\.enabled).flatMap { h in
+            h.upcoming(after: date, location: config.location, days: 3).flatMap { [$0.start, $0.end] }
+        }.filter { $0 > date }.min()
+    }
+
+    private func runHolidays() async {
+        var done = Set<String>(), skipLogged = Set<String>()
+        var announced = false
+        while !Task.isCancelled {
+            if !announced {
+                announced = true
+                for h in config.holidays where h.enabled {
+                    let next = h.upcoming(after: now(), location: config.location).first.map { "next evening: \(RuleEngine.format($0.start))" } ?? "no dates left"
+                    log(LogEntry(category: "holiday", message: "‘\(h.name)’: \(next)"))
+                }
+            }
+            for (key, holiday, step) in dueHolidaySteps(at: now(), done: done) {
+                if case .start = step, anyHoldActive {
+                    // Not marked done: if the hold ends before the window does, the theme starts then.
+                    if skipLogged.insert(key).inserted { log(LogEntry(category: "holiday", message: "‘\(holiday.name)’ waiting: someone is home")) }
+                    continue
+                }
+                done.insert(key)
+                log(LogEntry(category: "holiday", message: "‘\(holiday.name)’: \({ if case .start = step { return "lights on in holiday colors" } else { return "back to normal" } }())"))
+                do { try await RuleEngine.run(.holiday(step), executor: executor, log: log) }
+                catch { log(LogEntry(level: .error, category: "holiday", message: "‘\(holiday.name)’ failed: \(error)")) }
+            }
+            // Slices, so Mac sleep or a clock change can't leave us waiting far too long.
+            let wait = nextHolidayMoment(after: now()).map { $0.timeIntervalSince(now()) } ?? 3600
+            try? await Task.sleep(for: .seconds(max(1, min(wait, 600))))
+        }
+    }
+
+    // MARK: Simulated occupancy
+
+    /// Walks the planned sessions in order, for as long as the engine runs. Plans are deterministic per night,
+    /// so a restart picks up the same night; a session already under way is run for its remaining time.
+    private func simulate(_ sim: Simulation) async {
+        var announced = false
+        var fired = Set<Date>()
+        while !Task.isCancelled {
+            let upcoming = sim.upcoming(after: now(), location: config.location)
+            if !announced {
+                announced = true
+                let next = upcoming.first.map { "next: \(RuleEngine.format($0.start))" } ?? "no sessions in the next week"
+                log(LogEntry(category: "simulate", message: "‘\(sim.name)’: \(next)"))
+            }
+            fired = fired.filter { $0 > now().addingTimeInterval(-86400) }
+            guard let session = upcoming.first(where: { !fired.contains($0.start) }) else {
+                try? await Task.sleep(for: .seconds(3600)); continue
+            }
+            let wait = session.start.timeIntervalSince(now())
+            if wait > 0 {
+                // Slices, so Mac sleep or a clock change can't leave us waiting far too long.
+                try? await Task.sleep(for: .seconds(min(wait, 600)))
+                continue
+            }
+            fired.insert(session.start)
+            fireSimulated(sim, session)
+        }
+    }
+
+    /// Visible for tests. Runs one session unless a presence hold covers its lights.
+    func fireSimulated(_ sim: Simulation, _ session: SimulatedSession) {
+        let remaining = session.end.timeIntervalSince(now())
+        guard remaining > 1 else { return }
+        let rule = Rule(name: sim.name, trigger: TriggerSpec(source: .clock, kind: "simulate"), actions: [sim.action(for: session, remaining: remaining)])
+        if let (hold, until) = activeHold(pausing: rule) {
+            log(LogEntry(category: "simulate", message: "‘\(sim.name)’ skipped: paused by ‘\(hold.name)’ until \(RuleEngine.format(until))"))
+            return
+        }
+        log(LogEntry(category: "simulate", message: "‘\(sim.name)’: lights on for \(Int(remaining / 60)) min"))
+        run(rule, holdKey: "simulate:\(sim.name)")
     }
 
     // MARK: Home.app switches

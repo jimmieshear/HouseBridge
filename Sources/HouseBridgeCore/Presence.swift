@@ -45,7 +45,7 @@ extension Action {
             return PauseTargets(rooms: room.map { [$0] } ?? [], zones: zone.map { [$0] } ?? [])
         case .lutron(let device, _, _): return PauseTargets(lutron: [device])
         case .plug(let device, _, _): return PauseTargets(plugs: [device])
-        case .wait, .log: return PauseTargets()
+        case .wait, .log, .holiday: return PauseTargets()
         }
     }
 }

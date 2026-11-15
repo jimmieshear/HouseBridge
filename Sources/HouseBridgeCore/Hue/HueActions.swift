@@ -41,9 +41,35 @@ public final class HueActions: ActionExecutor, @unchecked Sendable {
                 "brightness_delta": abs(delta),
             ]]
             for (type, id) in try await resolve(target) { try await put(type, id, body) }
+        case .holiday(let step):
+            try await holiday(step)
         case .wait, .log, .lutron, .plug:
             break
         }
+    }
+
+    /// Applies a holiday step to every light that can show color (white-only lights are left alone).
+    /// Every light is tried; the first failure is rethrown afterwards.
+    private func holiday(_ step: HolidayStep) async throws {
+        let lights = try await client.inventory(refresh: true).lights.filter(\.supportsColor).sorted { $0.name < $1.name }
+        var firstError: Error?
+        for (i, light) in lights.enumerated() {
+            do {
+                switch step {
+                case .start(let colors, let brightness):
+                    var state = LightState()
+                    state.on = true
+                    state.brightness = brightness
+                    state.colorHex = colors[i % colors.count]
+                    try await put("light", light.id, HueActions.body(for: state))
+                case .end(let kelvin, let turnOff):
+                    // Reset the color separately from switching off, so a light that is off stays off.
+                    if turnOff { try await put("light", light.id, ["on": ["on": false]]) }
+                    try await put("light", light.id, ["color_temperature": ["mirek": min(500, max(153, 1_000_000 / max(kelvin, 1)))]])
+                }
+            } catch { firstError = firstError ?? error }
+        }
+        if let firstError { throw firstError }
     }
 
     /// Picks the scene to move to. `current` nil (nothing active) starts at the first scene going forward, the last going back.

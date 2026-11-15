@@ -30,6 +30,7 @@ public struct HueInventory: Sendable {
         /// What it can do / what's in it, as short human-readable facts.
         public var details: [String] = []
         public var product: String = ""
+        public var supportsColor = false
     }
     public struct SceneItem: Sendable { public let id: String; public let name: String; public let groupName: String? }
     public var lights: [Item] = []
@@ -164,6 +165,7 @@ public final class HueClient: @unchecked Sendable {
             guard let id = l["id"] as? String, let n = (l["metadata"] as? JSON)?["name"] as? String else { return nil }
             var item = HueInventory.Item(id: id, name: n, groupedLightId: nil)
             item.details = capabilities(l)
+            item.supportsColor = l["color"] != nil
             item.product = ((l["owner"] as? JSON)?["rid"] as? String).flatMap { products[$0] } ?? ""
             return item
         }

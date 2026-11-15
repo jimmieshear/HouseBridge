@@ -16,7 +16,7 @@ func usage() -> Never {
     COMMANDS
       init                 Write a starter config to \(paths.configFile.path)
       validate             Check the config file and print a summary of its rules
-      schedule             Show today's sunrise/sunset and when each time-of-day rule fires next
+      schedule             Show today's sunrise/sunset, when each time-of-day rule fires next, and planned simulated-occupancy sessions
       presence             Show each presence hold (which automation is paused, and until when)
       run [--dry-run]      Run the bridge (Ctrl-C to stop). --dry-run logs actions instead of changing lights.
       set-unifi-password   Store the UniFi password in the macOS Keychain (--delete removes it)
@@ -181,6 +181,22 @@ case "schedule":
         let sched = r.trigger.schedule!
         let next = sched.next(after: Date(), location: config.location).map { f.string(from: $0) } ?? "never"
         print("  • \(r.name): \(sched.summary) → next \(next)\(r.enabled ? "" : "  [disabled]")")
+    }
+    // The plan is deterministic per night, so this is what the running app will do (unless someone is home).
+    let tf = DateFormatter(); tf.dateFormat = "HH:mm"
+    for h in config.holidays {
+        let windows = h.upcoming(after: Date(), location: config.location, days: 400).prefix(2)
+            .map { "\(f.string(from: $0.start))–\(tf.string(from: $0.end))" }
+        print("Holiday ‘\(h.name)’\(h.enabled ? "" : "  [disabled]"): \(h.colors.joined(separator: " ")) → next \(windows.first ?? "never")\(windows.count > 1 ? ", then \(windows[1])" : "")")
+    }
+    for sim in config.simulations {
+        print("Simulated occupancy ‘\(sim.name)’\(sim.enabled ? "" : "  [disabled]"), next 7 days:")
+        let sessions = sim.upcoming(after: Date(), location: config.location, days: 7)
+        if sessions.isEmpty { print("  (no sessions planned)") }
+        for s in sessions {
+            let target = sim.choices[s.choice].target
+            print("  • \(f.string(from: s.start))–\(tf.string(from: s.end)): \((target.rooms + target.lights + target.zones).joined(separator: ", "))")
+        }
     }
 
 case "presence":
