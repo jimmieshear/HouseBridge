@@ -14,6 +14,13 @@ public struct HomeKitConfig: Sendable {
     public init() {}
 }
 
+/// How to reach the cameras' RTSP streams for live view: the console address and the pins for its certificate.
+public struct HomeKitStreaming: Sendable {
+    public var host: String
+    public var hosts: KnownHosts
+    public init(host: String, hosts: KnownHosts) { self.host = host; self.hosts = hosts }
+}
+
 public struct HomeKitPairingInfo: Sendable {
     public var setupCode: String
     public var setupURI: String
@@ -33,6 +40,7 @@ public final class HomeKitBridge: @unchecked Sendable {
     private let switchNames: [String]
     private let onSwitchWrite: @Sendable (String, Bool) -> Void
     private let snapshots: @Sendable (_ cameraID: String, _ width: Int, _ height: Int) async -> Data?
+    private let streaming: HomeKitStreaming?
     private let queue = DispatchQueue(label: "housebridge.homekit")
 
     private var lockDescriptor: Int32 = -1
@@ -43,6 +51,10 @@ public final class HomeKitBridge: @unchecked Sendable {
     private var switchKeys: [String: HAPCharKey] = [:]
     private var cameraIDs: [Int: String] = [:]
     private var setupEndpointKeys: Set<HAPCharKey> = []
+    private var selectedStreamKeys: Set<HAPCharKey> = []
+    private var streamingStatusKeys: [String: HAPCharKey] = [:]
+    private var channels: [String: [ProtectInventory.Channel]] = [:]
+    private var streams: CameraStreamManager?
     private var pendingInventory: [ProtectInventory.Item]?
     private var running = false
 
@@ -50,6 +62,7 @@ public final class HomeKitBridge: @unchecked Sendable {
     public init(config: HomeKitConfig, paths: Paths, switches: [String] = [],
                 onSwitchWrite: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
                 snapshots: @escaping @Sendable (String, Int, Int) async -> Data? = { _, _, _ in nil },
+                streaming: HomeKitStreaming? = nil,
                 log: @escaping @Sendable (LogEntry) -> Void,
                 status: @escaping @Sendable (ConnectionStatus) -> Void) {
         self.config = config
@@ -59,6 +72,7 @@ public final class HomeKitBridge: @unchecked Sendable {
         self.switchNames = switches
         self.onSwitchWrite = onSwitchWrite
         self.snapshots = snapshots
+        self.streaming = streaming
     }
 
     // MARK: Pairing info (for the CLI and menu bar app)
@@ -103,6 +117,8 @@ public final class HomeKitBridge: @unchecked Sendable {
             running = false
             listener?.stop()
             listener = nil
+            streams?.stopAll()
+            streams = nil
             server = nil
             store = nil
             if lockDescriptor >= 0 { close(lockDescriptor); lockDescriptor = -1 }
@@ -139,6 +155,17 @@ public final class HomeKitBridge: @unchecked Sendable {
         }
         self.store = store
         self.server = server
+        if config.cameras, let streaming {
+            let manager = CameraStreamManager(queue: queue, makeRTSP: { [weak self] id, width, bitrate in self?.makeRTSP(cameraID: id, width: width, maxBitrateKbps: bitrate, streaming: streaming) },
+                                              makeSocket: { [queue] host, port, local in NWMediaSocket(host: host, port: port, localPort: local, queue: queue) },
+                                              log: { [weak self] message, level in self?.emit(message, level) })
+            manager.onActivity = { [weak self] id, active in
+                guard let self, let key = self.streamingStatusKeys[id] else { return }
+                self.server?.setValue(key, .data(HAPCamera.streamingStatus(active ? 1 : 0)))
+            }
+            streams = manager
+            server.onConnectionClosed = { [weak manager] id in manager?.connectionClosed(id) }
+        }
         applyDevices(store.state.devices)
 
         let listener = HAPListener(server: server, queue: queue, name: config.name, txt: { [weak self] in self?.txtRecord() ?? [:] },
@@ -212,6 +239,8 @@ public final class HomeKitBridge: @unchecked Sendable {
         switchKeys = built.switches
         cameraIDs = built.cameras
         setupEndpointKeys = Set(built.setupEndpoints.keys)
+        selectedStreamKeys = Set(built.selectedStreams.keys)
+        streamingStatusKeys = Dictionary(uniqueKeysWithValues: built.streamingStatus.compactMap { aid, key in built.cameras[aid].map { ($0, key) } })
         server.setAccessories(built.accessories)
         let fingerprint = HAPLayout.fingerprint(built.accessories)
         if fingerprint != store.state.layoutHash {
@@ -234,6 +263,7 @@ public final class HomeKitBridge: @unchecked Sendable {
     }
 
     private func applyInventory(_ items: [ProtectInventory.Item]) {
+        channels = Dictionary(uniqueKeysWithValues: items.filter { $0.kind == "camera" }.map { ($0.id, $0.channels) })
         let devices = items.map { HAPDevice(id: $0.id, name: $0.name, model: $0.model, kind: $0.kind, provides: $0.provides) }
         if devices != store?.state.devices { applyDevices(devices) }
         for item in items {
@@ -265,11 +295,34 @@ public final class HomeKitBridge: @unchecked Sendable {
             guard let name = switchNames.first(where: { switchKeys[$0.lowercased()] == key }) else { return }
             onSwitchWrite(name, on)
         case .data(let request) where setupEndpointKeys.contains(key):
-            // Live video is not available yet: say so, so Home.app shows an error instead of waiting.
-            emit("live view requested for camera \(cameraIDs[key.aid] ?? "?"), which is not supported yet (snapshots only)", .warning)
-            if let answer = HAPCamera.refuseSetup(request) { server?.setValue(key, .data(answer)) }
+            let id = cameraIDs[key.aid] ?? "?"
+            if let streams, let writer = server?.activeWriter {
+                server?.setValue(key, .data(streams.setup(cameraID: id, request: request, connection: writer.id, localAddress: writer.localAddress)))
+            } else {
+                // Without a way to reach the camera's stream, say so, so Home.app shows an error instead of waiting.
+                emit("live view requested for camera \(id), which is not available", .warning)
+                if let answer = HAPCamera.refuseSetup(request) { server?.setValue(key, .data(answer)) }
+            }
+        case .data(let request) where selectedStreamKeys.contains(key):
+            streams?.select(cameraID: cameraIDs[key.aid] ?? "?", request: request)
         default: break
         }
+    }
+
+    /// The camera's RTSP address for a viewer who wants `width` pixels across: the smallest enabled stream that is wide
+    /// enough (the cheapest one that looks right), else the biggest there is.
+    private func makeRTSP(cameraID: String, width: Int, maxBitrateKbps: Int, streaming: HomeKitStreaming) -> RTSPClient? {
+        let enabled = (channels[cameraID] ?? []).filter { $0.rtspEnabled }
+        guard !enabled.isEmpty else {
+            emit("camera \(cameraID) has no RTSP stream turned on. In UniFi Protect open the camera's settings, Advanced, and enable RTSP on at least one stream", .error)
+            return nil
+        }
+        let bySize = enabled.sorted { $0.width < $1.width }
+        let channel = bySize.first { $0.width >= width } ?? bySize.last!
+        guard let alias = channel.rtspAlias, let url = URL(string: "rtsps://\(streaming.host):7441/\(alias)") else { return nil }
+        emit("camera \(cameraID): using the \(channel.width)x\(channel.height) stream (\(channel.bitrate / 1000) kbps)")
+        let transport = NWRTSPTransport(host: streaming.host, port: 7441, tls: true, hosts: streaming.hosts, queue: queue)
+        return RTSPClient(url: url, transport: transport, queue: queue)
     }
 
     /// Reflects the automation's state in Home.app.

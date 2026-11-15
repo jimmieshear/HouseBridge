@@ -74,7 +74,18 @@ final class HAPListener {
         receive(nw, connection)
     }
 
+    /// "10.0.0.2" or "fe80::1" (no scope id, no IPv4-in-IPv6 prefix), as a controller expects to be told it.
+    static func plainAddress(_ host: NWEndpoint.Host) -> String {
+        var text = "\(host)"
+        if let scope = text.firstIndex(of: "%") { text = String(text[..<scope]) }
+        if text.lowercased().hasPrefix("::ffff:"), text.contains(".") { text = String(text.dropFirst(7)) }
+        return text
+    }
+
     private func receive(_ nw: NWConnection, _ connection: HAPConnection) {
+        if connection.localAddress == nil, case .hostPort(let host, _)? = nw.currentPath?.localEndpoint {
+            connection.localAddress = Self.plainAddress(host)
+        }
         nw.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, complete, error in
             if let data, !data.isEmpty { connection.receive(data) }
             if complete || error != nil { nw.cancel(); return }

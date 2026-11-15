@@ -10,6 +10,10 @@ final class HAPServer {
     var onPairingsChanged: () -> Void = {}
     /// Called when a controller writes a value (not for Identify); the value is already stored.
     var onWrite: (HAPCharKey, HAPValue) -> Void = { _, _ in }
+    /// The connection whose write is being handled (valid only inside `onWrite`): its identity and the local address it reached us on.
+    private(set) var activeWriter: (id: ObjectIdentifier, localAddress: String?)?
+    /// A controller's connection went away; sessions it started should end.
+    var onConnectionClosed: (ObjectIdentifier) -> Void = { _ in }
     /// Fetches a JPEG for a camera accessory (`POST /resource`). Must call `done` exactly once, on the server's queue.
     var snapshot: (_ aid: Int, _ width: Int, _ height: Int, _ done: @escaping (Data?) -> Void) -> Void = { _, _, _, done in done(nil) }
 
@@ -50,7 +54,14 @@ final class HAPServer {
         return connection
     }
 
+    fileprivate func dispatchWrite(_ key: HAPCharKey, _ value: HAPValue, from connection: HAPConnection) {
+        activeWriter = (ObjectIdentifier(connection), connection.localAddress)
+        defer { activeWriter = nil }
+        onWrite(key, value)
+    }
+
     func connectionClosed(_ connection: HAPConnection) {
+        onConnectionClosed(ObjectIdentifier(connection))
         connections.removeValue(forKey: ObjectIdentifier(connection))
         if setupOwner === connection { setupOwner = nil }
     }
@@ -173,6 +184,8 @@ final class HAPConnection {
     var close: () -> Void = {}
 
     private(set) var controllerID: String?
+    /// The address of ours the controller connected to (set by the transport); camera streams are announced from it.
+    var localAddress: String?
     private var isAdmin = false
     private var subscriptions: Set<HAPCharKey> = []
     private var session: HAPSession?
@@ -417,15 +430,15 @@ final class HAPConnection {
                     else if c.format == "bool", let on = Self.boolValue(item["value"]) {
                         let value = HAPValue.bool(on)
                         server.setValue(key, value)
-                        server.onWrite(key, value)
+                        server.dispatchWrite(key, value, from: self)
                     } else if c.format == "tlv8", let text = item["value"] as? String, let raw = Data(base64Encoded: text) {
                         let value = HAPValue.data(raw)
                         server.setValue(key, value)
-                        server.onWrite(key, value)
+                        server.dispatchWrite(key, value, from: self)
                     } else if c.format == "uint8", let n = (item["value"] as? NSNumber)?.intValue {
                         let value = HAPValue.int(n)
                         server.setValue(key, value)
-                        server.onWrite(key, value)
+                        server.dispatchWrite(key, value, from: self)
                     }
                 }
             } else {

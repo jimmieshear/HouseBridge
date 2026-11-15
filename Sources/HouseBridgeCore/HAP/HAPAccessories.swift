@@ -83,6 +83,8 @@ enum HAPLayout {
         /// Camera accessories: aid -> Protect device id, and each camera's SetupEndpoints characteristic.
         var cameras: [Int: String] = [:]
         var setupEndpoints: [HAPCharKey: Int] = [:]
+        var selectedStreams: [HAPCharKey: Int] = [:]
+        var streamingStatus: [Int: HAPCharKey] = [:]
     }
 
     private struct IIDs {
@@ -220,6 +222,8 @@ enum HAPLayout {
         let active = HAPCharacteristic(iid: ids.take(), type: HAPCamera.active, format: "uint8", perms: ["pr", "pw", "ev"],
                                        description: "Active", initial: .int(1), extra: ["minValue": 0, "maxValue": 1])
         built.setupEndpoints[HAPCharKey(aid: aid, iid: setup.iid)] = aid
+        built.selectedStreams[HAPCharKey(aid: aid, iid: selected.iid)] = aid
+        built.streamingStatus[aid] = HAPCharKey(aid: aid, iid: status.iid)
         let micIID = ids.take()
         let mute = HAPCharacteristic(iid: ids.take(), type: HAPCamera.mute, format: "bool", perms: ["pr", "pw", "ev"],
                                      description: "Mute", initial: .bool(false))

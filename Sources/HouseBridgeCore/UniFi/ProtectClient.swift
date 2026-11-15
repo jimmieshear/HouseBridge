@@ -1,6 +1,12 @@
 import Foundation
 
 public struct ProtectInventory: Sendable {
+    /// One of a camera's video streams (Protect calls them high, medium and low).
+    public struct Channel: Sendable, Equatable {
+        public var width: Int, height: Int, fps: Int, bitrate: Int
+        public var rtspAlias: String?
+        public var rtspEnabled: Bool
+    }
     public struct Item: Sendable {
         public let id: String
         public let name: String
@@ -11,6 +17,8 @@ public struct ProtectInventory: Sendable {
         public var details: [String] = []
         /// Current state at the time of the bootstrap: contact (true = open), motion, leak (true = detected).
         public var state: [String: Bool] = [:]
+        /// Cameras only.
+        public var channels: [Channel] = []
     }
     public var items: [Item] = []
 }
@@ -86,6 +94,11 @@ public final class ProtectClient: @unchecked Sendable {
                     if (flags?["smartDetectAudioTypes"] as? [String])?.isEmpty == false { item.details.append("audio detection: " + (flags?["smartDetectAudioTypes"] as? [String] ?? []).joined(separator: ", ")) }
                     if let state = d["state"] as? String { item.details.append("state: \(state)") }
                     if let moving = d["isMotionDetected"] as? Bool { item.state["motion"] = moving }
+                    item.channels = ((d["channels"] as? [JSON]) ?? []).map { c in
+                        ProtectInventory.Channel(width: c["width"] as? Int ?? 0, height: c["height"] as? Int ?? 0, fps: c["fps"] as? Int ?? 0,
+                                                 bitrate: c["bitrate"] as? Int ?? 0, rtspAlias: c["rtspAlias"] as? String,
+                                                 rtspEnabled: (c["isRtspEnabled"] as? Bool ?? false) && (c["rtspAlias"] as? String)?.isEmpty == false)
+                    }
                 } else {
                     let mount = d["mountType"] as? String ?? "unknown"
                     item.details.append("mount: \(mount)")

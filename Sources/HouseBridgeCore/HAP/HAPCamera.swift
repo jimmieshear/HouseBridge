@@ -1,7 +1,7 @@
 import Foundation
 
-/// HomeKit camera description: the TLV8 blobs that tell Home.app what a camera can stream, and the (for now, refusing)
-/// answer to a live-view request. Stage 1 serves snapshots only; the streaming setup is answered with an error.
+/// HomeKit camera description: the TLV8 blobs that tell Home.app what a camera can stream. Live view itself is in
+/// `CameraStream.swift`; `refuseSetup` is the answer when it is not available.
 ///
 /// Written from the HAP specification without a reference implementation to compare against, and not yet
 /// seen working in Home.app: treat the exact byte layouts as unverified.
@@ -16,9 +16,10 @@ enum HAPCamera {
     private static func byte(_ v: Int) -> Data { Data([UInt8(truncatingIfNeeded: v)]) }
     private static func le16(_ v: Int) -> Data { Data([UInt8(truncatingIfNeeded: v), UInt8(truncatingIfNeeded: v >> 8)]) }
 
-    /// One H.264 configuration (Main profile, level 3.1, non-interleaved packetization) at one resolution.
+    /// One H.264 configuration (High profile, level 4.0, non-interleaved packetization) at one resolution. The camera's own
+    /// stream is forwarded as it is, so this mostly tells the controller what to expect.
     static func supportedVideoConfiguration(width: Int = 1280, height: Int = 720, fps: Int = 30) -> Data {
-        let params = tlv([(1, byte(1)), (2, byte(0)), (3, byte(0))])                 // profile Main, level 3.1, packetization 0
+        let params = tlv([(1, byte(2)), (2, byte(2)), (3, byte(0))])                 // profile High, level 4.0, packetization 0
         let attributes = tlv([(1, le16(width)), (2, le16(height)), (3, byte(fps))])
         let codec = tlv([(1, byte(0)), (2, params), (3, attributes)])                 // codec type 0 = H.264
         return tlv([(1, codec)])

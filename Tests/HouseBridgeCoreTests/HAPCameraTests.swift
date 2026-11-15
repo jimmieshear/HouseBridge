@@ -94,6 +94,36 @@ final class HAPCameraTests: XCTestCase {
         XCTAssertEqual(c.request("PUT", "/characteristics", body: bad).status, 207)
     }
 
+    func testWritesCarryTheWritersIdentityAndAddressAndCloseIsReported() throws {
+        let c = pairedController()
+        c.connection.localAddress = "10.0.0.2"
+        let setup = try characteristic("118"), selected = try characteristic("117")
+        var seen: [(String, ObjectIdentifier?, String?)] = []
+        server.onWrite = { key, _ in
+            let name = key.iid == setup.iid ? "setup" : key.iid == selected.iid ? "selected" : "?"
+            seen.append((name, self.server.activeWriter?.id, self.server.activeWriter?.localAddress))
+        }
+        for iid in [setup.iid, selected.iid] {
+            let body = try JSONSerialization.data(withJSONObject: ["characteristics": [["aid": 2, "iid": iid, "value": "AQID"]]])
+            XCTAssertEqual(c.request("PUT", "/characteristics", body: body).status, 204)
+        }
+        XCTAssertEqual(seen.map(\.0), ["setup", "selected"])
+        XCTAssertTrue(seen.allSatisfy { $0.1 == ObjectIdentifier(c.connection) && $0.2 == "10.0.0.2" })
+        XCTAssertNil(server.activeWriter, "only valid while the write is handled")
+
+        var closed: [ObjectIdentifier] = []
+        server.onConnectionClosed = { closed.append($0) }
+        c.connection.connectionDidClose()
+        XCTAssertEqual(closed, [ObjectIdentifier(c.connection)])
+    }
+
+    func testLayoutRoutesTheStreamingCharacteristics() throws {
+        let selected = try characteristic("117"), setup = try characteristic("118"), status = try characteristic("120")
+        XCTAssertEqual(built.selectedStreams, [HAPCharKey(aid: 2, iid: selected.iid): 2])
+        XCTAssertEqual(built.setupEndpoints, [HAPCharKey(aid: 2, iid: setup.iid): 2])
+        XCTAssertEqual(built.streamingStatus[2], HAPCharKey(aid: 2, iid: status.iid))
+    }
+
     func testSnapshotIsServedAsynchronouslyAndHoldsLaterRequestsBack() throws {
         let c = pairedController()
         var pending: ((Data?) -> Void)?

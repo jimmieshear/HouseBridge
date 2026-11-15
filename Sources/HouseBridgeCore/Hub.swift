@@ -211,6 +211,7 @@ public final class Hub: @unchecked Sendable {
                 let bridge = HomeKitBridge(config: hk, paths: paths, switches: config.homekitSwitches,
                                            onSwitchWrite: { name, on in Task { await engine.setSwitch(name, on: on) } },
                                            snapshots: { await snapshotRelay.snapshot($0, $1, $2) },
+                                           streaming: config.unifi.map { HomeKitStreaming(host: $0.host, hosts: hosts) },
                                            log: log, status: { status(.homekit, $0) })
                 homekit = bridge
                 relay.attach(bridge)
