@@ -183,6 +183,7 @@ final class CameraStreamManager: @unchecked Sendable {
         }
         session.setupTimeout = timeout
         queue.asyncAfter(deadline: .now() + 15, execute: timeout)
+        log("camera \(cameraID): live view set up for \(setup.address) (video port \(setup.videoPort), audio port \(setup.audioPort)); answering from \(localAddress) ports \(ports.0)/\(ports.1)", .info)
         let v6 = localAddress.contains(":")
         return CameraStreamTLV.setupResponse(setup, address: localAddress, ipv6: v6, videoPort: ports.0, audioPort: ports.1,
                                              videoSSRC: session.videoSSRC, audioSSRC: session.audioSSRC)
@@ -200,6 +201,7 @@ final class CameraStreamManager: @unchecked Sendable {
 
     func select(cameraID: String, request: Data) {
         guard let selection = CameraStreamTLV.parseSelection(request) else { log("camera \(cameraID): unreadable stream selection", .warning); return }
+        log("camera \(cameraID): stream command \(selection.command)\(sessions[selection.sessionID] == nil ? " (no matching session)" : "")", .info)
         switch selection.command {
         case .start:
             guard let session = sessions[selection.sessionID], !session.started else { return }

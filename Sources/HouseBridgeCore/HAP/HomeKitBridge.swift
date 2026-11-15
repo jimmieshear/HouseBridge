@@ -145,11 +145,12 @@ public final class HomeKitBridge: @unchecked Sendable {
         server.onPairingsChanged = { [weak self] in self?.pairingsChanged() }
         server.onWrite = { [weak self] key, value in self?.handleWrite(key, value) }
         server.snapshot = { [weak self] aid, width, height, done in
-            guard let self, let id = self.cameraIDs[aid] else { return done(nil) }
+            guard let self, let id = self.cameraIDs[aid] else { self?.emit("snapshot requested for unknown accessory \(aid)", .warning); return done(nil) }
             let provider = self.snapshots, queue = self.queue, log = self.emit
             Task {
                 let data = await provider(id, width, height)
-                if data == nil { log("snapshot of camera \(id) failed", .warning) }
+                if let data { log("snapshot of camera \(id) sent (\(width)x\(height), \(data.count) bytes)", .info) }
+                else { log("snapshot of camera \(id) failed: could not fetch it from UniFi Protect", .warning) }
                 queue.async { done(data) }
             }
         }
@@ -296,6 +297,7 @@ public final class HomeKitBridge: @unchecked Sendable {
             onSwitchWrite(name, on)
         case .data(let request) where setupEndpointKeys.contains(key):
             let id = cameraIDs[key.aid] ?? "?"
+            emit("camera \(id): Home.app is setting up live view")
             if let streams, let writer = server?.activeWriter {
                 server?.setValue(key, .data(streams.setup(cameraID: id, request: request, connection: writer.id, localAddress: writer.localAddress)))
             } else {
@@ -304,21 +306,21 @@ public final class HomeKitBridge: @unchecked Sendable {
                 if let answer = HAPCamera.refuseSetup(request) { server?.setValue(key, .data(answer)) }
             }
         case .data(let request) where selectedStreamKeys.contains(key):
+            emit("camera \(cameraID(key.aid)): Home.app sent a stream command (\(streams == nil ? "ignored: no stream manager" : "ok"))")
             streams?.select(cameraID: cameraIDs[key.aid] ?? "?", request: request)
         default: break
         }
     }
 
+    private func cameraID(_ aid: Int) -> String { cameraIDs[aid] ?? "?" }
+
     /// The camera's RTSP address for a viewer who wants `width` pixels across: the smallest enabled stream that is wide
     /// enough (the cheapest one that looks right), else the biggest there is.
     private func makeRTSP(cameraID: String, width: Int, maxBitrateKbps: Int, streaming: HomeKitStreaming) -> RTSPClient? {
-        let enabled = (channels[cameraID] ?? []).filter { $0.rtspEnabled }
-        guard !enabled.isEmpty else {
-            emit("camera \(cameraID) has no RTSP stream turned on. In UniFi Protect open the camera's settings, Advanced, and enable RTSP on at least one stream", .error)
+        guard let channel = CameraChannels.choose(channels[cameraID] ?? [], width: width) else {
+            emit("camera \(cameraID) has no RTSP stream turned on. In UniFi Protect open the camera's settings, Advanced, Share Livestream, and enable RTSPS on at least one stream", .error)
             return nil
         }
-        let bySize = enabled.sorted { $0.width < $1.width }
-        let channel = bySize.first { $0.width >= width } ?? bySize.last!
         guard let alias = channel.rtspAlias, let url = URL(string: "rtsps://\(streaming.host):7441/\(alias)") else { return nil }
         emit("camera \(cameraID): using the \(channel.width)x\(channel.height) stream (\(channel.bitrate / 1000) kbps)")
         let transport = NWRTSPTransport(host: streaming.host, port: 7441, tls: true, hosts: streaming.hosts, queue: queue)

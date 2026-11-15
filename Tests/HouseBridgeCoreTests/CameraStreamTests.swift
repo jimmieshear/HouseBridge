@@ -220,6 +220,23 @@ final class CameraStreamTests: XCTestCase {
     }
 }
 
+final class CameraChannelsTests: XCTestCase {
+    private func channel(_ width: Int, enabled: Bool = true, alias: String? = nil) -> ProtectInventory.Channel {
+        .init(width: width, height: width * 9 / 16, fps: 30, bitrate: 1_000_000, rtspAlias: alias ?? "a\(width)", rtspEnabled: enabled)
+    }
+
+    func testPicksTheSmallestEnabledStreamThatIsWideEnough() {
+        let all = [channel(3840), channel(1280), channel(640)]
+        XCTAssertEqual(CameraChannels.choose(all, width: 1280)?.width, 1280)
+        XCTAssertEqual(CameraChannels.choose(all, width: 1000)?.width, 1280)
+        XCTAssertEqual(CameraChannels.choose(all, width: 1281)?.width, 3840)
+        XCTAssertEqual(CameraChannels.choose(all, width: 5000)?.width, 3840, "nothing wide enough: the biggest")
+        XCTAssertEqual(CameraChannels.choose([channel(3840), channel(1280, enabled: false), channel(640)], width: 1280)?.width, 3840, "disabled streams are skipped")
+        XCTAssertNil(CameraChannels.choose([channel(1280, enabled: false)], width: 1280))
+        XCTAssertNil(CameraChannels.choose([], width: 1280))
+    }
+}
+
 /// AAC-LC frames made with the system encoder, as a camera would produce them (48 kHz mono, config 1188).
 enum AACTestSource {
     static func frames(count: Int) throws -> [Data] {

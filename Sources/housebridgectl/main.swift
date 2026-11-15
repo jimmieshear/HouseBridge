@@ -27,6 +27,7 @@ func usage() -> Never {
                            [--from-file <config.json>] [--ui <http://host:8581>] [--ui-user <name>] [--out <file>] [--print] [--store-password]
       homekit [--reset]    Show the code for adding HouseBridge to Home.app and who is paired (--reset forgets everything)
       list lutron|hue|unifi|kasa  Show (add --raw to lutron to dump the bridge's raw replies) the devices, buttons, lights, scenes or cameras you can use in rules
+      camera-test [name] [--seconds N]  Check what HomeKit live view needs, camera by camera: snapshot, RTSP stream, H.264 and audio (run it on the Mac that runs HouseBridge)
       devices [--brief] [--save]  List every Lutron, Hue and UniFi device: what it reports, what you can do with it, example rules
       diagnose [--save]    Print a report (config, certificates, live connection tests, recent log) to share when something fails
       logs [-n N]          Show the last N lines of the log file (default 80) and its location
@@ -407,6 +408,19 @@ case "pair-hue":
         }
     }
     fail("Timed out waiting for the link button.")
+
+case "camera-test":
+    let config = loadConfig()
+    guard let unifi = config.unifi else { print("No unifi: section in the config."); exit(1) }
+    var name: String?
+    var seconds = 6.0
+    var i = 0
+    let rest = Array(args.dropFirst())
+    while i < rest.count {
+        if rest[i] == "--seconds", i + 1 < rest.count, let n = Double(rest[i + 1]) { seconds = max(1, min(60, n)); i += 2 }
+        else { name = (name.map { $0 + " " } ?? "") + rest[i]; i += 1 }
+    }
+    await CameraDiagnostics.run(unifi: unifi, hosts: KnownHosts(url: paths.knownHostsFile), camera: name, seconds: seconds, say: { print($0) })
 
 case "list":
     let config = loadConfig()
