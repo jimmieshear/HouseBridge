@@ -117,6 +117,33 @@ final class HAPCameraTests: XCTestCase {
         XCTAssertEqual(closed, [ObjectIdentifier(c.connection)])
     }
 
+    func testTraceDescribesRequestsWithoutPairingBodies() throws {
+        let write = HAPRequest(method: "PUT", path: "/characteristics", query: [:], headers: [:],
+                               body: try JSONSerialization.data(withJSONObject: ["characteristics": [["aid": 2, "iid": 9, "value": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYn"], ["aid": 2, "iid": 7, "ev": true]]]))
+        let text = HAPConnection.describe(write)
+        XCTAssertTrue(text.hasPrefix("PUT /characteristics [2.9 value=AQIDBAUG"), text)
+        XCTAssertTrue(text.contains("2.7 ev=1"), text)
+        XCTAssertLessThan(text.count, 140, "long values are cut")
+        XCTAssertEqual(HAPConnection.describe(HAPRequest(method: "GET", path: "/characteristics", query: ["id": "2.9,2.10"], headers: [:], body: Data())), "GET /characteristics?id=2.9,2.10")
+        XCTAssertEqual(HAPConnection.describe(HAPRequest(method: "POST", path: "/pair-setup", query: [:], headers: [:], body: Data([1, 2, 3]))), "POST /pair-setup")
+        let resource = HAPRequest(method: "POST", path: "/resource", query: [:], headers: [:],
+                                  body: try JSONSerialization.data(withJSONObject: ["resource-type": "image", "aid": 2, "image-width": 640, "image-height": 360]))
+        XCTAssertEqual(HAPConnection.describe(resource), "POST /resource aid=2 image-height=360 image-width=640 resource-type=image")
+    }
+
+    func testTraceLogsEachRequestWhenEnabled() throws {
+        var lines: [String] = []
+        server.log = { lines.append($0) }
+        let c = pairedController()
+        server.trace = true
+        _ = c.request("GET", "/accessories")
+        XCTAssertTrue(lines.contains("HAP GET /accessories -> 200"), "\(lines)")
+        server.trace = false
+        lines = []
+        _ = c.request("GET", "/accessories")
+        XCTAssertTrue(lines.isEmpty)
+    }
+
     func testLayoutRoutesTheStreamingCharacteristics() throws {
         let selected = try characteristic("117"), setup = try characteristic("118"), status = try characteristic("120")
         XCTAssertEqual(built.selectedStreams, [HAPCharKey(aid: 2, iid: selected.iid): 2])

@@ -10,6 +10,8 @@ final class HAPServer {
     var onPairingsChanged: () -> Void = {}
     /// Called when a controller writes a value (not for Identify); the value is already stored.
     var onWrite: (HAPCharKey, HAPValue) -> Void = { _, _ in }
+    /// Log each request after it is answered (see `HAPConnection.describe`).
+    var trace = false
     /// The connection whose write is being handled (valid only inside `onWrite`): its identity and the local address it reached us on.
     private(set) var activeWriter: (id: ObjectIdentifier, localAddress: String?)?
     /// A controller's connection went away; sessions it started should end.
@@ -310,8 +312,32 @@ final class HAPConnection {
     }
 
     private func respond(to request: HAPRequest) {
-        if session != nil, request.method == "POST", request.path == "/resource" { return resource(request.body) }
-        emit(route(request))
+        if session != nil, request.method == "POST", request.path == "/resource" {
+            if server.trace { server.log("HAP \(Self.describe(request))") }
+            return resource(request.body)
+        }
+        let response = route(request)
+        if server.trace { server.log("HAP \(Self.describe(request)) -> \(response.status)") }
+        emit(response)
+    }
+
+    /// One line for the trace: the request, and for characteristic traffic which characteristics. Pairing bodies are never shown.
+    static func describe(_ request: HAPRequest) -> String {
+        var text = "\(request.method) \(request.path)"
+        if !request.query.isEmpty { text += "?" + request.query.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "&") }
+        guard request.path == "/characteristics" || request.path == "/resource",
+              let root = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any] else { return text }
+        if let items = root["characteristics"] as? [[String: Any]] {
+            text += " [" + items.map { item in
+                var part = "\(item["aid"] ?? "?").\(item["iid"] ?? "?")"
+                if item["ev"] != nil { part += " ev=\(item["ev"] ?? "")" }
+                if let value = item["value"] { part += " value=\(String("\(value)".prefix(40)))" }
+                return part
+            }.joined(separator: ", ") + "]"
+        } else {
+            text += " " + root.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+        }
+        return text
     }
 
     /// `POST /resource`: a JPEG of what the camera sees, sized as asked. The answer may take a moment, so the

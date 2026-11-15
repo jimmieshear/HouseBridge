@@ -11,6 +11,8 @@ public struct HomeKitConfig: Sendable {
     public var smartDetections = false
     /// Publish cameras as HomeKit cameras (a snapshot in Home.app), not just their sensors.
     public var cameras = false
+    /// Log every HomeKit request and its status (not pairing secrets), to see what Home.app is doing.
+    public var debug = false
     public init() {}
 }
 
@@ -142,6 +144,7 @@ public final class HomeKitBridge: @unchecked Sendable {
         let store = HAPStore(url: paths.homeKitFile, setupCode: config.setupCode)
         let server = HAPServer(store: store)
         server.log = { [weak self] message in self?.emit(message) }
+        server.trace = config.debug
         server.onPairingsChanged = { [weak self] in self?.pairingsChanged() }
         server.onWrite = { [weak self] key, value in self?.handleWrite(key, value) }
         server.snapshot = { [weak self] aid, width, height, done in
