@@ -15,14 +15,17 @@ enum TLV8 {
 
     struct Item: Equatable { var tag: UInt8; var value: Data }
 
-    static func encode(_ items: [(Tag, Data)]) -> Data {
+    static func encode(_ items: [(Tag, Data)]) -> Data { encode(raw: items.map { ($0.0.rawValue, $0.1) }) }
+
+    /// Same, for tags outside the pairing set (camera and other service TLVs).
+    static func encode(raw items: [(UInt8, Data)]) -> Data {
         var out = Data()
         for (tag, value) in items {
-            if value.isEmpty { out.append(contentsOf: [tag.rawValue, 0]); continue }
+            if value.isEmpty { out.append(contentsOf: [tag, 0]); continue }
             var offset = value.startIndex
             while offset < value.endIndex {
                 let end = value.index(offset, offsetBy: 255, limitedBy: value.endIndex) ?? value.endIndex
-                out.append(tag.rawValue)
+                out.append(tag)
                 out.append(UInt8(value.distance(from: offset, to: end)))
                 out.append(value[offset..<end])
                 offset = end

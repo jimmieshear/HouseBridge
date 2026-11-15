@@ -10,6 +10,8 @@ final class HAPServer {
     var onPairingsChanged: () -> Void = {}
     /// Called when a controller writes a value (not for Identify); the value is already stored.
     var onWrite: (HAPCharKey, HAPValue) -> Void = { _, _ in }
+    /// Fetches a JPEG for a camera accessory (`POST /resource`). Must call `done` exactly once, on the server's queue.
+    var snapshot: (_ aid: Int, _ width: Int, _ height: Int, _ done: @escaping (Data?) -> Void) -> Void = { _, _, _, done in done(nil) }
 
     private(set) var accessories: [HAPAccessory] = []
     private var characteristics: [HAPCharKey: HAPCharacteristic] = [:]
@@ -161,6 +163,7 @@ enum HAPStatus {
     static let insufficientAuthorization = -70411
     static let invalidValue = -70410
     static let notAllowed = -70401
+    static let communicationFailure = -70402
 }
 
 final class HAPConnection {
@@ -176,6 +179,8 @@ final class HAPConnection {
     private var inbound = Data()
     private var plain = Data()
     private var closed = false
+    /// A request (a snapshot) is being answered asynchronously; later requests wait until it has been.
+    private var waiting = false
 
     // Pair Setup / Verify state
     private var srp: SRP.Server?
@@ -202,7 +207,7 @@ final class HAPConnection {
     }
 
     private func pump() {
-        while !closed {
+        while !closed, !waiting {
             if session != nil, !decryptAvailable() { return }
             guard let request = nextRequest() else { return }
             respond(to: request)
@@ -292,7 +297,33 @@ final class HAPConnection {
     }
 
     private func respond(to request: HAPRequest) {
-        let response = route(request)
+        if session != nil, request.method == "POST", request.path == "/resource" { return resource(request.body) }
+        emit(route(request))
+    }
+
+    /// `POST /resource`: a JPEG of what the camera sees, sized as asked. The answer may take a moment, so the
+    /// connection holds back further requests until it is sent.
+    private func resource(_ body: Data) {
+        guard let root = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              root["resource-type"] as? String == "image", let aid = (root["aid"] as? NSNumber)?.intValue,
+              let width = (root["image-width"] as? NSNumber)?.intValue, let height = (root["image-height"] as? NSNumber)?.intValue,
+              (1...4096).contains(width), (1...4096).contains(height) else {
+            return emit(.json(["status": HAPStatus.invalidValue], status: 400))
+        }
+        waiting = true
+        server.snapshot(aid, width, height) { [weak self] data in
+            guard let self, !self.closed else { return }
+            self.waiting = false
+            if let data, !data.isEmpty {
+                self.emit(HAPResponse(status: 200, contentType: "image/jpeg", body: data))
+            } else {
+                self.emit(.json(["status": HAPStatus.communicationFailure], status: 500))
+            }
+            self.pump()
+        }
+    }
+
+    private func emit(_ response: HAPResponse) {
         var head = "HTTP/1.1 \(response.status) \(Self.reasons[response.status] ?? "OK")\r\n"
         if let type = response.contentType { head += "Content-Type: \(type)\r\n" }
         head += "Content-Length: \(response.body.count)\r\nConnection: keep-alive\r\n\r\n"
@@ -385,6 +416,14 @@ final class HAPConnection {
                     else if !c.writable { status = HAPStatus.writeToReadOnly }
                     else if c.format == "bool", let on = Self.boolValue(item["value"]) {
                         let value = HAPValue.bool(on)
+                        server.setValue(key, value)
+                        server.onWrite(key, value)
+                    } else if c.format == "tlv8", let text = item["value"] as? String, let raw = Data(base64Encoded: text) {
+                        let value = HAPValue.data(raw)
+                        server.setValue(key, value)
+                        server.onWrite(key, value)
+                    } else if c.format == "uint8", let n = (item["value"] as? NSNumber)?.intValue {
+                        let value = HAPValue.int(n)
                         server.setValue(key, value)
                         server.onWrite(key, value)
                     }

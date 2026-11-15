@@ -129,6 +129,40 @@ public final class ProtectClient: @unchecked Sendable {
         return found!
     }
 
+    // MARK: Snapshots
+
+    /// A JPEG from `cameraID`, at most `width` x `height`. Reuses the saved login session; logs in again only when the
+    /// console says it expired (or there is none), because UniFi locks out clients that log in too often.
+    public func snapshot(cameraID: String, width: Int, height: Int) async throws -> Data {
+        guard !cameraID.isEmpty, cameraID.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) else {
+            throw HTTPFailure(status: 0, body: "bad camera id")
+        }
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let consoleURL = URL(string: "https://\(config.host)")!
+        func fetch() async throws -> (Data, Int) {
+            var parts = URLComponents(string: "https://\(config.host)/proxy/protect/api/cameras/\(cameraID)/snapshot")!
+            parts.queryItems = [URLQueryItem(name: "w", value: String(width)), URLQueryItem(name: "h", value: String(height)),
+                                URLQueryItem(name: "ts", value: String(Int(Date().timeIntervalSince1970 * 1000)))]
+            var request = URLRequest(url: parts.url!)
+            request.timeoutInterval = 10
+            let (data, response) = try await session.data(for: request)
+            return (data, (response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        var (data, code) = (Data(), 401)
+        if let cookies = cachedCookies() {
+            session.configuration.httpCookieStorage?.setCookies(cookies, for: consoleURL, mainDocumentURL: nil)
+            (data, code) = try await fetch()
+        }
+        if code == 401 || code == 403 {
+            try await login(session)
+            cache(session.configuration.httpCookieStorage?.cookies(for: consoleURL))
+            (data, code) = try await fetch()
+        }
+        guard code == 200, !data.isEmpty else { throw HTTPFailure(status: code, body: "snapshot request failed") }
+        return data
+    }
+
     // MARK: Run loop
 
     /// Cookies from the last successful login, kept for the life of the process so a reconnect (or a config

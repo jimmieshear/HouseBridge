@@ -282,7 +282,7 @@ public enum ConfigLoader {
             config.kasa = cfg
         }
         if let h = try r.reader("homekit") {
-            try h.rejectUnknown(["name", "port", "setup_code", "smart_detections"])
+            try h.rejectUnknown(["name", "port", "setup_code", "smart_detections", "cameras"])
             var cfg = HomeKitConfig()
             if let name = try h.string("name") {
                 guard !name.isEmpty, name.count <= 64 else { throw ConfigError(path: h.path + ".name", message: "must be 1-64 characters") }
@@ -299,6 +299,7 @@ public enum ConfigLoader {
                 cfg.setupCode = code
             }
             cfg.smartDetections = try h.bool("smart_detections") ?? false
+            cfg.cameras = try h.bool("cameras") ?? false
             config.homekit = cfg
         }
         if let l = try r.reader("location") {

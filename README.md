@@ -160,7 +160,7 @@ Run `housebridgectl devices` for a catalog of what each device reports, what it 
 | Door/window/garage sensor | Contact sensor, motion sensor |
 | Leak sensor | Leak sensor |
 
-There is no video or camera feed. Pairing identity and controllers are stored in `~/.config/housebridge/homekit.json`; deleting it (or `housebridgectl homekit --reset`) means pairing again. Only one HouseBridge process can run the bridge at a time. To move from Homebridge: remove the Protect accessories from Home.app, stop Homebridge, pair HouseBridge, then rebuild any Home automations that used the old accessories.
+By default there is no video or camera feed. **Experimental:** with `cameras: true` under `homekit:`, each Protect camera also appears as a HomeKit camera, so Home.app shows a snapshot of what it sees (fetched from Protect when you open the tile). Live video is not implemented yet; opening the live view reports an error. Turning `cameras` on changes the accessory list, so Home.app reloads it; if a camera misbehaves, set it back to `false`. Pairing identity and controllers are stored in `~/.config/housebridge/homekit.json`; deleting it (or `housebridgectl homekit --reset`) means pairing again. Only one HouseBridge process can run the bridge at a time. To move from Homebridge: remove the Protect accessories from Home.app, stop Homebridge, pair HouseBridge, then rebuild any Home automations that used the old accessories.
 
 ### Importing from Homebridge
 

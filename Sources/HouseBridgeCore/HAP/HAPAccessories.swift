@@ -7,13 +7,14 @@ struct HAPCharKey: Hashable, Sendable {
 }
 
 enum HAPValue: Equatable {
-    case bool(Bool), int(Int), string(String), null
+    case bool(Bool), int(Int), string(String), data(Data), null
 
     var json: Any {
         switch self {
         case .bool(let b): return b
         case .int(let i): return i
         case .string(let s): return s
+        case .data(let d): return d.base64EncodedString()   // tlv8 and data formats travel as base64 text
         case .null: return NSNull()
         }
     }
@@ -79,6 +80,9 @@ enum HAPLayout {
         var routes: [String: HAPRoute] = [:]
         /// Keyed by the lowercased switch name; the On characteristic of that switch.
         var switches: [String: HAPCharKey] = [:]
+        /// Camera accessories: aid -> Protect device id, and each camera's SetupEndpoints characteristic.
+        var cameras: [Int: String] = [:]
+        var setupEndpoints: [HAPCharKey: Int] = [:]
     }
 
     private struct IIDs {
@@ -146,7 +150,8 @@ enum HAPLayout {
     }
 
     static func build(bridgeName: String, bridgeID: String, devices: [(device: HAPDevice, aid: Int)],
-                      smartDetections: Bool, switches: [(name: String, aid: Int)] = []) -> Built {
+                      smartDetections: Bool, cameras: Bool = false,
+                      switches: [(name: String, aid: Int)] = []) -> Built {
         var built = Built()
 
         var ids = IIDs()
@@ -176,6 +181,10 @@ enum HAPLayout {
             if smartDetections {
                 for input in device.provides.filter({ !knownInputs.contains($0) }) { add(input, label(input), .motion) }
             }
+            if cameras, device.kind == "camera" {
+                services += cameraServices(&ids, aid: aid, name: device.name, built: &built)
+                built.cameras[aid] = device.id
+            }
             built.accessories.append(HAPAccessory(aid: aid, services: services))
         }
 
@@ -193,6 +202,29 @@ enum HAPLayout {
             built.switches[name.lowercased()] = HAPCharKey(aid: aid, iid: on.iid)
         }
         return built
+    }
+
+    /// The services that make an accessory a camera in Home.app: stream management (what it can send and how to ask
+    /// for it) and a microphone. Snapshots need no characteristic; they are fetched through `POST /resource`.
+    private static func cameraServices(_ ids: inout IIDs, aid: Int, name: String, built: inout Built) -> [HAPService] {
+        func tlvChar(_ type: String, _ description: String, _ perms: [String], _ value: Data) -> HAPCharacteristic {
+            HAPCharacteristic(iid: ids.take(), type: type, format: "tlv8", perms: perms, description: description, initial: .data(value))
+        }
+        let managementIID = ids.take()
+        let video = tlvChar(HAPCamera.supportedVideo, "Supported Video Stream Configuration", ["pr"], HAPCamera.supportedVideoConfiguration())
+        let audio = tlvChar(HAPCamera.supportedAudio, "Supported Audio Stream Configuration", ["pr"], HAPCamera.supportedAudioConfiguration())
+        let rtp = tlvChar(HAPCamera.supportedRTP, "Supported RTP Configuration", ["pr"], HAPCamera.supportedRTPConfiguration())
+        let selected = tlvChar(HAPCamera.selectedStream, "Selected RTP Stream Configuration", ["pr", "pw"], HAPCamera.idleSelection())
+        let setup = tlvChar(HAPCamera.setupEndpoints, "Setup Endpoints", ["pr", "pw"], Data())
+        let status = tlvChar(HAPCamera.streamingStatus, "Streaming Status", ["pr", "ev"], HAPCamera.streamingStatus())
+        let active = HAPCharacteristic(iid: ids.take(), type: HAPCamera.active, format: "uint8", perms: ["pr", "pw", "ev"],
+                                       description: "Active", initial: .int(1), extra: ["minValue": 0, "maxValue": 1])
+        built.setupEndpoints[HAPCharKey(aid: aid, iid: setup.iid)] = aid
+        let micIID = ids.take()
+        let mute = HAPCharacteristic(iid: ids.take(), type: HAPCamera.mute, format: "bool", perms: ["pr", "pw", "ev"],
+                                     description: "Mute", initial: .bool(false))
+        return [HAPService(iid: managementIID, type: HAPCamera.streamManagement, characteristics: [video, audio, rtp, selected, setup, status, active]),
+                HAPService(iid: micIID, type: HAPCamera.microphone, characteristics: [mute])]
     }
 
     /// Changes whenever the shape of the accessory database changes (values excluded); drives the `c#` number.

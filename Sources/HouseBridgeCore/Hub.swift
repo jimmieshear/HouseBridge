@@ -61,7 +61,6 @@ final class ActionRouter: ActionExecutor, @unchecked Sendable {
     }
 }
 
-/// Wires the configured sources (Lutron, UniFi) to the rule engine and Hue. One Hub per loaded config.
 /// Lets the rule engine (built first) reach the HomeKit bridge (built after it).
 private final class SwitchRelay: @unchecked Sendable {
     private let lock = NSLock()
@@ -70,6 +69,18 @@ private final class SwitchRelay: @unchecked Sendable {
     func set(_ name: String, _ on: Bool) { lock.lock(); let b = bridge; lock.unlock(); b?.setSwitch(name, on: on) }
 }
 
+/// Lets the HomeKit bridge (built before the Protect client) ask the client for snapshots.
+private final class SnapshotRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var client: ProtectClient?
+    func attach(_ client: ProtectClient) { lock.withLock { self.client = client } }
+    func snapshot(_ id: String, _ width: Int, _ height: Int) async -> Data? {
+        guard let client = lock.withLock({ client }) else { return nil }
+        return try? await client.snapshot(cameraID: id, width: width, height: height)
+    }
+}
+
+/// Wires the configured sources (Lutron, UniFi) to the rule engine and Hue. One Hub per loaded config.
 public final class Hub: @unchecked Sendable {
     public let config: Config
     private let paths: Paths
@@ -151,6 +162,7 @@ public final class Hub: @unchecked Sendable {
         if !dryRun { router.shortcuts = ShortcutRunner(log: log) }
         // Dry runs must not touch the real hold state.
         let relay = SwitchRelay()
+        let snapshotRelay = SnapshotRelay()
         let engine = RuleEngine(config: config, executor: router, onEvent: eventSink,
                                 holdStore: dryRun ? nil : HoldStore(url: paths.holdsFile),
                                 onSwitch: { relay.set($0, $1) },
@@ -198,6 +210,7 @@ public final class Hub: @unchecked Sendable {
             } else {
                 let bridge = HomeKitBridge(config: hk, paths: paths, switches: config.homekitSwitches,
                                            onSwitchWrite: { name, on in Task { await engine.setSwitch(name, on: on) } },
+                                           snapshots: { await snapshotRelay.snapshot($0, $1, $2) },
                                            log: log, status: { status(.homekit, $0) })
                 homekit = bridge
                 relay.attach(bridge)
@@ -216,6 +229,7 @@ public final class Hub: @unchecked Sendable {
                 let client = ProtectClient(config: unifi, hosts: hosts, emit: { engine.submit($0); homekit?.handle($0) },
                                            onInventory: { homekit?.updateInventory($0) },
                                            status: { status(.unifi, $0) }, log: log)
+                snapshotRelay.attach(client)
                 tasks.append(Task { await client.run() })
             }
         } else {

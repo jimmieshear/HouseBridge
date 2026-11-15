@@ -63,18 +63,19 @@ A from-scratch HomeKit Accessory Protocol (HAP) server. CryptoKit supplies Curve
 | `HAPAccessories.swift` | Accessory/service/characteristic model, `HAPLayout.build` (Protect device -> HomeKit services), layout fingerprint for `c#` |
 | `HAPServer.swift` | Protocol core with no sockets: `HAPServer` (database, values, events, pairings) and `HAPConnection` (pair-setup, pair-verify, encrypted framing, `/accessories`, `/characteristics`, `/pairings`, EVENT notifications) |
 | `HAPListener.swift` | `NWListener` + Bonjour `_hap._tcp` advertisement; feeds bytes to `HAPConnection` |
+| `HAPCamera.swift` | Camera TLV8 blobs (supported video/audio/RTP configuration, streaming status) and the refusal answer to SetupEndpoints. Opt-in via `homekit: cameras: true`. Stage 1 = snapshots only: `HAPConnection` serves `POST /resource` asynchronously (later requests wait), `ProtectClient.snapshot` fetches the JPEG reusing the cached login. Live video (RTSP in, SRTP out, natively, no ffmpeg) is the planned stage 2 |
 | `HomeKitBridge.swift` | Public façade used by `Hub`: lifecycle, single-instance `flock`, inventory -> accessories, Protect events -> characteristic updates |
 
 Mapping: camera `motion` -> MotionSensor; `ring` -> StatelessProgrammableSwitch (single press event); sensor `contact` -> ContactSensor (1 = open); `motion` -> MotionSensor; `leak` -> LeakSensor; with `smart_detections: true`, each smart-detect type -> an extra MotionSensor. Bridge is aid 1; each Protect device gets a permanent aid.
 
 Wiring: `ProtectClient` takes `onInventory:` (called after every bootstrap, items carry initial `state`); `Hub` tees raw Protect events to `HomeKitBridge.handle` as well as the rule engine. In `--dry-run`/`events` modes the HomeKit bridge is not started. Only one process may own the bridge (`homekit.lock`); `Hub.stop()` releases it synchronously so a config reload can restart it.
 
-Config (`homekit:` section): `name`, `port`, `setup_code` (validated; HomeKit rejects trivial codes), `smart_detections`. It requires a `unifi:` section.
+Config (`homekit:` section): `name`, `port`, `setup_code` (validated; HomeKit rejects trivial codes), `smart_detections`, `cameras`. It requires a `unifi:` section.
 
 ### What is and is not verified
 
 - Verified by tests: bignum against Python `pow()` vectors, Fermat on the group prime, SRP client/server round trip, TLV8, and the whole pairing/session/event flow against an in-process "controller" in `HAPProtocolTests`.
-- **Not verified:** pairing with a real iPhone/Home.app, and the network layer (`HAPListener`, Bonjour). The controller in the tests is written from the same reading of the HAP spec as the server, so it proves self-consistency, not interoperability. The agent sandbox blocks opening listening sockets (`EPERM`), so the listener could not be run there; test live outside the sandbox on a real LAN.
+- **Not verified:** the camera services and snapshots in Home.app (the TLV layouts in `HAPCamera.swift` were written from the HAP spec with no reference implementation and may need adjusting), pairing with a real iPhone/Home.app, and the network layer (`HAPListener`, Bonjour). The controller in the tests is written from the same reading of the HAP spec as the server, so it proves self-consistency, not interoperability. The agent sandbox blocks opening listening sockets (`EPERM`), so the listener could not be run there; test live outside the sandbox on a real LAN.
 - Known ambiguity: the SRP session key hashes the unpadded `S`; about 1 in 256 pairing attempts may fail on a leading-zero mismatch. Retrying works.
 - Pairing requires the iPhone/Mac to be on the same LAN/VLAN as the bridge (Bonjour + direct TCP). It cannot be done remotely, and Home Assistant cannot either. Options: use Home.app on a Mac on that LAN, or have an edit-capable Home member pair at the house. If pairing times out, check `housebridgectl logs` (look for `pair setup started`), `dns-sd -B _hap._tcp`, the macOS firewall prompt, Local Network permission and VLAN isolation.
 

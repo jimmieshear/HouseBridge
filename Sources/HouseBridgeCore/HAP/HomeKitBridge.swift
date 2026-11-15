@@ -9,6 +9,8 @@ public struct HomeKitConfig: Sendable {
     public var setupCode: String?
     /// Also publish a motion sensor per smart detection (person, vehicle, ...), not just plain motion.
     public var smartDetections = false
+    /// Publish cameras as HomeKit cameras (a snapshot in Home.app), not just their sensors.
+    public var cameras = false
     public init() {}
 }
 
@@ -30,6 +32,7 @@ public final class HomeKitBridge: @unchecked Sendable {
     private let status: @Sendable (ConnectionStatus) -> Void
     private let switchNames: [String]
     private let onSwitchWrite: @Sendable (String, Bool) -> Void
+    private let snapshots: @Sendable (_ cameraID: String, _ width: Int, _ height: Int) async -> Data?
     private let queue = DispatchQueue(label: "housebridge.homekit")
 
     private var lockDescriptor: Int32 = -1
@@ -38,12 +41,15 @@ public final class HomeKitBridge: @unchecked Sendable {
     private var listener: HAPListener?
     private var routes: [String: HAPRoute] = [:]
     private var switchKeys: [String: HAPCharKey] = [:]
+    private var cameraIDs: [Int: String] = [:]
+    private var setupEndpointKeys: Set<HAPCharKey> = []
     private var pendingInventory: [ProtectInventory.Item]?
     private var running = false
 
     /// `switches` are published as On/Off switches; `onSwitchWrite` is told when Home.app flips one.
     public init(config: HomeKitConfig, paths: Paths, switches: [String] = [],
                 onSwitchWrite: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
+                snapshots: @escaping @Sendable (String, Int, Int) async -> Data? = { _, _, _ in nil },
                 log: @escaping @Sendable (LogEntry) -> Void,
                 status: @escaping @Sendable (ConnectionStatus) -> Void) {
         self.config = config
@@ -52,6 +58,7 @@ public final class HomeKitBridge: @unchecked Sendable {
         self.status = status
         self.switchNames = switches
         self.onSwitchWrite = onSwitchWrite
+        self.snapshots = snapshots
     }
 
     // MARK: Pairing info (for the CLI and menu bar app)
@@ -120,10 +127,15 @@ public final class HomeKitBridge: @unchecked Sendable {
         let server = HAPServer(store: store)
         server.log = { [weak self] message in self?.emit(message) }
         server.onPairingsChanged = { [weak self] in self?.pairingsChanged() }
-        server.onWrite = { [weak self] key, value in
-            guard let self, case .bool(let on) = value,
-                  let name = self.switchNames.first(where: { self.switchKeys[$0.lowercased()] == key }) else { return }
-            self.onSwitchWrite(name, on)
+        server.onWrite = { [weak self] key, value in self?.handleWrite(key, value) }
+        server.snapshot = { [weak self] aid, width, height, done in
+            guard let self, let id = self.cameraIDs[aid] else { return done(nil) }
+            let provider = self.snapshots, queue = self.queue, log = self.emit
+            Task {
+                let data = await provider(id, width, height)
+                if data == nil { log("snapshot of camera \(id) failed", .warning) }
+                queue.async { done(data) }
+            }
         }
         self.store = store
         self.server = server
@@ -195,9 +207,11 @@ public final class HomeKitBridge: @unchecked Sendable {
         let placed = devices.map { (device: $0, aid: store.state.aids[$0.id] ?? 0) }.sorted { $0.aid < $1.aid }
         let switches = switchNames.map { (name: $0, aid: store.state.aids["switch:" + $0.lowercased()] ?? 0) }
         let built = HAPLayout.build(bridgeName: config.name, bridgeID: store.state.deviceID, devices: placed,
-                                    smartDetections: config.smartDetections, switches: switches)
+                                    smartDetections: config.smartDetections, cameras: config.cameras, switches: switches)
         routes = built.routes
         switchKeys = built.switches
+        cameraIDs = built.cameras
+        setupEndpointKeys = Set(built.setupEndpoints.keys)
         server.setAccessories(built.accessories)
         let fingerprint = HAPLayout.fingerprint(built.accessories)
         if fingerprint != store.state.layoutHash {
@@ -241,6 +255,20 @@ public final class HomeKitBridge: @unchecked Sendable {
             case (.button, "start"): server.fireEvent(route.key, value: .int(0))   // 0 = single press
             default: break
             }
+        }
+    }
+
+    /// Writes from Home.app: automation switches, and the camera's live-view setup.
+    private func handleWrite(_ key: HAPCharKey, _ value: HAPValue) {
+        switch value {
+        case .bool(let on):
+            guard let name = switchNames.first(where: { switchKeys[$0.lowercased()] == key }) else { return }
+            onSwitchWrite(name, on)
+        case .data(let request) where setupEndpointKeys.contains(key):
+            // Live video is not available yet: say so, so Home.app shows an error instead of waiting.
+            emit("live view requested for camera \(cameraIDs[key.aid] ?? "?"), which is not supported yet (snapshots only)", .warning)
+            if let answer = HAPCamera.refuseSetup(request) { server?.setValue(key, .data(answer)) }
+        default: break
         }
     }
 
