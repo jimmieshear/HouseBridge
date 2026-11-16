@@ -42,9 +42,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSAppTransportSecurity</key>
   <dict><key>NSAllowsLocalNetworking</key><true/></dict>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>HouseBridge talks to your Lutron, Hue, UniFi and Kasa devices on the local network.</string>
+  <string>HouseBridge talks to your Lutron, Hue, UniFi, Kasa and Matter devices on the local network.</string>
   <key>NSBonjourServices</key>
-  <array><string>_hap._tcp</string></array>
+  <array><string>_hap._tcp</string><string>_matter._tcp</string><string>_matterc._udp</string><string>_meshcop._udp</string></array>
 </dict></plist>
 PLIST
 
