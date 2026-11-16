@@ -69,4 +69,29 @@ final class KasaTests: XCTestCase {
         let noKasa = "rules:\n  - name: x\n    when: { at: \"18:00\" }\n    then:\n      - { action: plug, device: P }\n"
         XCTAssertThrowsError(try ConfigLoader.parse(noKasa))
     }
+
+    func testPlugAsHomeKitOutlet() throws {
+        let yaml = """
+        unifi: { host: 3.3.3.3, username: u, password: p }
+        homekit: { name: HB }
+        kasa:
+          plugs:
+            - { name: Outdoor, host: 10.0.0.5, homekit: true }
+            - { name: Hidden, host: 10.0.0.6 }
+        """
+        let c = try ConfigLoader.parse(yaml)
+        XCTAssertEqual(c.homekitOutlets, ["Outdoor"])
+
+        // Needs a homekit: section.
+        XCTAssertThrowsError(try ConfigLoader.parse("kasa:\n  plugs:\n    - { name: Outdoor, host: 10.0.0.5, homekit: true }\n"))
+
+        let built = HAPLayout.build(bridgeName: "HB", bridgeID: "id", devices: [], smartDetections: false, outlets: [(name: "Outdoor", aid: 7)])
+        let key = built.outlets["outdoor"]
+        XCTAssertNotNil(key)
+        let accessory = built.accessories.first { $0.aid == 7 }
+        XCTAssertEqual(accessory?.services.last?.type, "47")   // Outlet
+        let on = accessory?.services.flatMap(\.characteristics).first { $0.iid == key?.iid }
+        XCTAssertEqual(on?.type, "25")
+        XCTAssertEqual(on?.perms, ["pr", "pw", "ev"])
+    }
 }

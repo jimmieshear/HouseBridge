@@ -8,6 +8,8 @@ public final class KasaBridge: @unchecked Sendable {
     private let devices: [String: KasaDevice]       // lowercased plug name → device
     private let lock = NSLock()
     private var offTimers: [String: Task<Void, Never>] = [:]
+    /// Told (plug name, new state) whenever a plug is switched through this bridge, so Home.app can follow.
+    public var onChange: (@Sendable (String, Bool) -> Void)?
 
     public init(config: KasaConfig, log: @escaping @Sendable (LogEntry) -> Void,
                 status: @escaping @Sendable (ConnectionStatus) -> Void = { _ in }) {
@@ -48,15 +50,22 @@ public final class KasaBridge: @unchecked Sendable {
         }
         lock.withLock { _ = offTimers.removeValue(forKey: key)?.cancel() }
         try await device.setPower(on)
+        onChange?(name, on)
         guard on, let offAfter else { return }
         let timer = Task { [weak self] in
             try? await Task.sleep(for: .seconds(offAfter))
             guard !Task.isCancelled, let self else { return }
             self.lock.withLock { _ = self.offTimers.removeValue(forKey: key) }
-            do { try await device.setPower(false) }
+            do { try await device.setPower(false); self.onChange?(name, false) }
             catch { self.log(LogEntry(level: .error, category: "kasa", message: "turning ‘\(name)’ off failed: \(describeError(error))")) }
         }
         lock.withLock { offTimers[key] = timer }
+    }
+
+    /// The plug's current state, nil when it can't be read.
+    public func isOn(_ name: String) async -> Bool? {
+        guard let device = devices[name.lowercased()] else { return nil }
+        return try? await device.info().0.isOn
     }
 
     /// Cancels pending `off_after_seconds` timers (names as in rules), leaving the plugs as they are.

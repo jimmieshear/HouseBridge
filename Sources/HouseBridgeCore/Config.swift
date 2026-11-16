@@ -18,6 +18,9 @@ public struct Config: Sendable {
     public var rules: [Rule] = []
     public init() {}
 
+    /// Kasa plugs published to Home.app as outlets, in config order.
+    public var homekitOutlets: [String] { kasa?.plugs.filter(\.homekit).map(\.name) ?? [] }
+
     /// Distinct `homekit_switch` names of the enabled rules, in config order.
     public var homekitSwitches: [String] {
         var seen = Set<String>(), out: [String] = []
@@ -67,6 +70,8 @@ public struct UnifiConfig: Sendable {
 public struct KasaPlug: Sendable {
     public var name: String
     public var host: String
+    /// Publish this plug to Home.app as an Outlet on the HomeKit bridge.
+    public var homekit = false
 }
 
 public struct KasaConfig: Sendable {
@@ -283,8 +288,10 @@ public enum ConfigLoader {
             for (i, item) in items.enumerated() {
                 guard case .map(let m) = item else { throw ConfigError(path: "\(k.path).plugs[\(i)]", message: "must be a map") }
                 let p = Reader(map: m, path: "\(k.path).plugs[\(i)]")
-                try p.rejectUnknown(["name", "host"])
-                let plug = KasaPlug(name: try p.requireString("name"), host: try p.requireString("host"))
+                try p.rejectUnknown(["name", "host", "homekit"])
+                var plug = KasaPlug(name: try p.requireString("name"), host: try p.requireString("host"))
+                plug.homekit = try p.bool("homekit") ?? false
+                if plug.homekit, plug.name.count > 64 { throw ConfigError(path: p.path + ".name", message: "must be at most 64 characters to appear in Home.app") }
                 guard !cfg.plugs.contains(where: { $0.name.lowercased() == plug.name.lowercased() }) else {
                     throw ConfigError(path: p.path + ".name", message: "two plugs are named '\(plug.name)'")
                 }
@@ -405,6 +412,9 @@ public enum ConfigLoader {
     private static func validate(_ config: Config) throws {
         if config.homekit != nil && config.unifi == nil {
             throw ConfigError(path: "homekit", message: "publishes UniFi Protect devices to Home.app, so it needs a 'unifi:' section")
+        }
+        if let kasa = config.kasa, config.homekit == nil, let plug = kasa.plugs.first(where: \.homekit) {
+            throw ConfigError(path: "kasa.plugs", message: "plug '\(plug.name)' has 'homekit: true', which needs a 'homekit:' section")
         }
         for rule in config.rules {
             guard let name = rule.homekitSwitch else { continue }

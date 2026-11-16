@@ -67,6 +67,7 @@ private final class SwitchRelay: @unchecked Sendable {
     private var bridge: HomeKitBridge?
     func attach(_ bridge: HomeKitBridge?) { lock.lock(); self.bridge = bridge; lock.unlock() }
     func set(_ name: String, _ on: Bool) { lock.lock(); let b = bridge; lock.unlock(); b?.setSwitch(name, on: on) }
+    func setOutlet(_ name: String, _ on: Bool) { lock.lock(); let b = bridge; lock.unlock(); b?.setOutlet(name, on: on) }
 }
 
 /// Lets the HomeKit bridge (built before the Protect client) ask the client for snapshots.
@@ -212,6 +213,17 @@ public final class Hub: @unchecked Sendable {
             } else {
                 let bridge = HomeKitBridge(config: hk, paths: paths, switches: config.homekitSwitches,
                                            onSwitchWrite: { name, on in Task { await engine.setSwitch(name, on: on) } },
+                                           outlets: config.homekitOutlets,
+                                           onOutletWrite: { [weak router] name, on in
+                                               Task {
+                                                   guard let kasa = router?.kasa else { return }
+                                                   do { try await kasa.setPlug(name, on: on) }
+                                                   catch {
+                                                       log(LogEntry(level: .error, category: "homekit", message: "switching ‘\(name)’ from Home.app failed: \(describeError(error))"))
+                                                       if let real = await kasa.isOn(name) { relay.setOutlet(name, real) }   // put Home.app back
+                                                   }
+                                               }
+                                           },
                                            snapshots: { await snapshotRelay.snapshot($0, $1, $2) },
                                            streaming: config.unifi.map { HomeKitStreaming(host: $0.host, hosts: hosts) },
                                            log: log, status: { status(.homekit, $0) })
@@ -223,6 +235,18 @@ public final class Hub: @unchecked Sendable {
             status(.homekit, .notConfigured)
         }
         let homekit = self.homekit
+        // Keep Home.app's outlets in step with the plugs: changes made through HouseBridge arrive at once, changes made
+        // elsewhere (Kasa app, the plug's button) within a minute.
+        let outlets = config.homekitOutlets
+        if !outlets.isEmpty, let kasa = kasaBridge {
+            kasa.onChange = { name, on in relay.setOutlet(name, on) }
+            tasks.append(Task {
+                while !Task.isCancelled {
+                    for name in outlets { if let on = await kasa.isOn(name) { relay.setOutlet(name, on) } }
+                    try? await Task.sleep(for: .seconds(60))
+                }
+            })
+        }
 
         if let unifi = config.unifi {
             if unifi.resolvedPassword() == nil {

@@ -69,7 +69,7 @@ struct HAPRoute: Equatable {
 enum HAPLayout {
     // Service and characteristic types (short form of the HomeKit base UUID).
     static let accessoryInformation = "3E", protocolInformation = "A2"
-    static let switchService = "49", motionSensor = "85", contactSensor = "80", leakSensor = "83", statelessSwitch = "89"
+    static let switchService = "49", outletService = "47", motionSensor = "85", contactSensor = "80", leakSensor = "83", statelessSwitch = "89"
 
     /// Inputs that have their own handling; anything else a camera reports is a smart detection (person, vehicle, ...).
     private static let knownInputs: Set<String> = ["motion", "ring", "contact", "leak", "tamper", "alarm"]
@@ -80,6 +80,8 @@ enum HAPLayout {
         var routes: [String: HAPRoute] = [:]
         /// Keyed by the lowercased switch name; the On characteristic of that switch.
         var switches: [String: HAPCharKey] = [:]
+        /// Keyed by the lowercased plug name; the On characteristic of that outlet.
+        var outlets: [String: HAPCharKey] = [:]
         /// Camera accessories: aid -> Protect device id, and each camera's SetupEndpoints characteristic.
         var cameras: [Int: String] = [:]
         var setupEndpoints: [HAPCharKey: Int] = [:]
@@ -153,7 +155,7 @@ enum HAPLayout {
 
     static func build(bridgeName: String, bridgeID: String, devices: [(device: HAPDevice, aid: Int)],
                       smartDetections: Bool, cameras: Bool = false,
-                      switches: [(name: String, aid: Int)] = []) -> Built {
+                      switches: [(name: String, aid: Int)] = [], outlets: [(name: String, aid: Int)] = []) -> Built {
         var built = Built()
 
         var ids = IIDs()
@@ -202,6 +204,22 @@ enum HAPLayout {
             let service = HAPService(iid: serviceIID, type: switchService, characteristics: [nameCharacteristic, on])
             built.accessories.append(HAPAccessory(aid: aid, services: [info, service]))
             built.switches[name.lowercased()] = HAPCharKey(aid: aid, iid: on.iid)
+        }
+
+        // Kasa plugs: an Outlet, writable. Outlet In Use stays true (a plug cannot tell whether something is drawing power).
+        for (name, aid) in outlets {
+            var ids = IIDs()
+            let info = information(&ids, name: name, manufacturer: "TP-Link", model: "Kasa Plug",
+                                   serial: "outlet-\(aid)", firmware: "1.0")
+            let serviceIID = ids.take()
+            let nameCharacteristic = string(&ids, "23", "Name", name)
+            let on = HAPCharacteristic(iid: ids.take(), type: "25", format: "bool", perms: ["pr", "pw", "ev"],
+                                       description: "On", initial: .bool(false))
+            let inUse = HAPCharacteristic(iid: ids.take(), type: "26", format: "bool", perms: ["pr", "ev"],
+                                          description: "Outlet In Use", initial: .bool(true))
+            let service = HAPService(iid: serviceIID, type: outletService, characteristics: [nameCharacteristic, on, inUse])
+            built.accessories.append(HAPAccessory(aid: aid, services: [info, service]))
+            built.outlets[name.lowercased()] = HAPCharKey(aid: aid, iid: on.iid)
         }
         return built
     }

@@ -41,6 +41,8 @@ public final class HomeKitBridge: @unchecked Sendable {
     private let status: @Sendable (ConnectionStatus) -> Void
     private let switchNames: [String]
     private let onSwitchWrite: @Sendable (String, Bool) -> Void
+    private let outletNames: [String]
+    private let onOutletWrite: @Sendable (String, Bool) -> Void
     private let snapshots: @Sendable (_ cameraID: String, _ width: Int, _ height: Int) async -> Data?
     private let streaming: HomeKitStreaming?
     private let queue = DispatchQueue(label: "housebridge.homekit")
@@ -51,6 +53,8 @@ public final class HomeKitBridge: @unchecked Sendable {
     private var listener: HAPListener?
     private var routes: [String: HAPRoute] = [:]
     private var switchKeys: [String: HAPCharKey] = [:]
+    private var outletKeys: [String: HAPCharKey] = [:]
+    private var outletState: [String: Bool] = [:]
     private var cameraIDs: [Int: String] = [:]
     private var setupEndpointKeys: Set<HAPCharKey> = []
     private var selectedStreamKeys: Set<HAPCharKey> = []
@@ -63,6 +67,8 @@ public final class HomeKitBridge: @unchecked Sendable {
     /// `switches` are published as On/Off switches; `onSwitchWrite` is told when Home.app flips one.
     public init(config: HomeKitConfig, paths: Paths, switches: [String] = [],
                 onSwitchWrite: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
+                outlets: [String] = [],
+                onOutletWrite: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
                 snapshots: @escaping @Sendable (String, Int, Int) async -> Data? = { _, _, _ in nil },
                 streaming: HomeKitStreaming? = nil,
                 log: @escaping @Sendable (LogEntry) -> Void,
@@ -73,6 +79,8 @@ public final class HomeKitBridge: @unchecked Sendable {
         self.status = status
         self.switchNames = switches
         self.onSwitchWrite = onSwitchWrite
+        self.outletNames = outlets
+        self.onOutletWrite = onOutletWrite
         self.snapshots = snapshots
         self.streaming = streaming
     }
@@ -235,12 +243,21 @@ public final class HomeKitBridge: @unchecked Sendable {
                 state.nextAid += 1
             }
         }
+        store.mutate { state in
+            for name in outletNames where state.aids["outlet:" + name.lowercased()] == nil {
+                state.aids["outlet:" + name.lowercased()] = state.nextAid
+                state.nextAid += 1
+            }
+        }
+        let outlets = outletNames.map { (name: $0, aid: store.state.aids["outlet:" + $0.lowercased()] ?? 0) }
         let placed = devices.map { (device: $0, aid: store.state.aids[$0.id] ?? 0) }.sorted { $0.aid < $1.aid }
         let switches = switchNames.map { (name: $0, aid: store.state.aids["switch:" + $0.lowercased()] ?? 0) }
         let built = HAPLayout.build(bridgeName: config.name, bridgeID: store.state.deviceID, devices: placed,
-                                    smartDetections: config.smartDetections, cameras: config.cameras, switches: switches)
+                                    smartDetections: config.smartDetections, cameras: config.cameras, switches: switches, outlets: outlets)
         routes = built.routes
         switchKeys = built.switches
+        outletKeys = built.outlets
+        for (name, on) in outletState { if let key = outletKeys[name] { server.setValue(key, .bool(on)) } }
         cameraIDs = built.cameras
         setupEndpointKeys = Set(built.setupEndpoints.keys)
         selectedStreamKeys = Set(built.selectedStreams.keys)
@@ -296,6 +313,11 @@ public final class HomeKitBridge: @unchecked Sendable {
     private func handleWrite(_ key: HAPCharKey, _ value: HAPValue) {
         switch value {
         case .bool(let on):
+            if let name = outletNames.first(where: { outletKeys[$0.lowercased()] == key }) {
+                outletState[name.lowercased()] = on   // optimistic; the plug's real state replaces it (or reverts it on failure)
+                onOutletWrite(name, on)
+                return
+            }
             guard let name = switchNames.first(where: { switchKeys[$0.lowercased()] == key }) else { return }
             onSwitchWrite(name, on)
         case .data(let request) where setupEndpointKeys.contains(key):
@@ -335,6 +357,15 @@ public final class HomeKitBridge: @unchecked Sendable {
         queue.async {
             guard self.running, let key = self.switchKeys[name.lowercased()] else { return }
             self.server?.setValue(key, .bool(on))
+        }
+    }
+
+    /// Reflects a Kasa plug's real state in Home.app (after a write, a rule, or a poll).
+    public func setOutlet(_ name: String, on: Bool) {
+        queue.async {
+            guard self.running else { return }
+            self.outletState[name.lowercased()] = on
+            if let key = self.outletKeys[name.lowercased()] { self.server?.setValue(key, .bool(on)) }
         }
     }
 

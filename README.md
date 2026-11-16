@@ -53,6 +53,7 @@ Each rule has a `when:` trigger and a list of `then:` actions.
 | **Light timer** | `off_after_seconds` on a `light` action (with `on: true`) turns the same lights off that long after the last such action; new activity restarts it and any later command for those lights cancels it |
 | **Per rule** | `between`, `cooldown_seconds`, `enabled`, `homekit_switch` |
 | **Home.app switch** | `homekit_switch: Name` on a rule that has a `light` action with `off_after_seconds` publishes a switch to Home.app (needs `homekit:`). It turns on when the rule fires and off when the auto-off timer ends. Turning it on in Home.app runs the rule's actions (ignoring its time window and presence holds), so the same timeout applies; turning it off cancels the timer and switches the lights off. Several rules can share one name |
+| **Kasa plug in Home.app** | `homekit: true` on a plug under `kasa: plugs:` (needs `homekit:`) publishes it to Home.app as an Outlet on the HouseBridge bridge, for plugs that have no HomeKit of their own. Home.app on/off goes to the plug over the LAN; changes from rules, the Kasa app or the plug's button show up in Home.app within a minute |
 
 ### Time of day and sunrise/sunset
 

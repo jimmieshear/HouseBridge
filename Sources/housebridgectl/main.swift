@@ -29,6 +29,7 @@ func usage() -> Never {
       pair-matter <code> [--name <label>]  Join a Matter device that is already in Apple Home (Home.app: accessory → Settings → Turn On Pairing Mode, then pass the code)
       unpair-matter <node>  Forget a Matter node this Mac joined (it stays in Apple Home)
       homekit [--reset]    Show the code for adding HouseBridge to Home.app and who is paired (--reset forgets everything)
+      list appletv [--all]  Find Apple TVs on this network with model and generation (--all also lists HomePods, TVs, Macs)
       list lutron|hue|unifi|kasa|matter  Show (add --raw to lutron to dump the bridge's raw replies) the devices, buttons, lights, scenes or cameras you can use in rules
       camera-test [name] [--seconds N]  Check what HomeKit live view needs, camera by camera: snapshot, RTSP stream, H.264 and audio (run it on the Mac that runs HouseBridge)
       devices [--brief] [--save]  List every Lutron, Hue and UniFi device: what it reports, what you can do with it, example rules
@@ -499,6 +500,16 @@ case "list":
             } catch { print("  could not read: \(describeError(error))") }
         }
         matter.stop()
+        exit(0)
+    }
+    if args.dropFirst().first == "appletv" {
+        let all = rest.contains("--all")
+        print("Browsing the local network for AirPlay devices (this Mac's LAN/VLAN only)…")
+        let found = await AppleTVDiscovery.find().filter { all || $0.isAppleTV }
+        if found.isEmpty { fail(all ? "No AirPlay devices found." : "No Apple TVs found. Try --all, and check Local Network permission and VLAN/mDNS reachability.") }
+        for d in found {
+            print("  “\(d.name)”  \(d.host ?? "?")  [\(d.model.isEmpty ? "?" : d.model)]  \(d.description)")
+        }
         exit(0)
     }
     let config = loadConfig()
