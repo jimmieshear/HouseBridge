@@ -133,6 +133,13 @@ final class LeapConnection: @unchecked Sendable {
 
     func close() { connection.cancel() }
 
+    /// Sends a message exactly as given (pairing uses a different shape from `request`).
+    func send(_ message: JSON) {
+        guard var data = try? JSONSerialization.data(withJSONObject: message) else { return }
+        data.append(contentsOf: Array("\r\n".utf8))
+        connection.send(content: data, completion: .contentProcessed { _ in })
+    }
+
     /// Suspends until the connection ends.
     func waitUntilClosed() async {
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in

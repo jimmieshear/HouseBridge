@@ -22,6 +22,7 @@ func usage() -> Never {
       set-unifi-password   Store the UniFi password in the macOS Keychain (--delete removes it)
       set-kasa-password    Store the Kasa/TP-Link account password in the macOS Keychain (--delete removes it)
       pair-hue             Pair with the Hue bridge (press its link button first)
+      pair-lutron [<ip>] [--out <dir>]  Pair with a Lutron Smart Bridge (Pro/RA2 Select) and write ca.pem, cert.pem, key.pem (default: <config home>/lutron)
       import-homebridge    Read a running Homebridge's config (found over Bonjour and its web UI, or --from-file) and add it to your HouseBridge config
                            (appends the missing unifi:/homekit: sections to an existing config, never overwrites; creates one if absent)
                            [--from-file <config.json>] [--ui <http://host:8581>] [--ui-user <name>] [--out <file>] [--print] [--store-password]
@@ -421,6 +422,29 @@ case "camera-test":
         else { name = (name.map { $0 + " " } ?? "") + rest[i]; i += 1 }
     }
     await CameraDiagnostics.run(unifi: unifi, hosts: KnownHosts(url: paths.knownHostsFile), camera: name, seconds: seconds, say: { print($0) })
+
+case "pair-lutron":
+    let outDir = takeOption("--out").map { URL(fileURLWithPath: Paths.expand($0)) } ?? paths.home.appendingPathComponent("lutron")
+    let host: String
+    if let given = args.dropFirst().first, !given.hasPrefix("-") { host = given }
+    else if let configured = (try? ConfigLoader.load(from: configURL))?.lutron?.host { host = configured }
+    else { fail("Give the bridge's IP address (housebridgectl pair-lutron <ip>) or set lutron.host in \(configURL.path).") }
+    if FileManager.default.fileExists(atPath: outDir.appendingPathComponent("key.pem").path) && !takeFlag("--force") {
+        fail("\(outDir.path) already holds Lutron certificates. Pick another folder with --out, or add --force to replace them.")
+    }
+    fileLog.write(category: "lutron", message: "pairing started with \(host)")
+    do {
+        let creds = try await LutronPairing.pair(host: host) {
+            print("Connected to \(host). Press the small button on the back of the bridge now… (waiting up to 3 minutes)")
+        }
+        try LutronPairing.save(creds, to: outDir)
+        fileLog.write(category: "lutron", message: "paired; certificates saved to \(outDir.path)")
+        print("Paired (LEAP \(creds.leapVersion ?? "?")). Certificates saved to \(outDir.path)")
+        print("Add to your config:\n  lutron:\n    host: \(host)\n    certs_dir: \(outDir.path)")
+        exit(0)
+    } catch {
+        fail("Lutron pairing failed: \(describeError(error))\nCheck the IP, that this Mac is on the bridge's LAN, and that it is a Smart Bridge Pro or RA2 Select (LEAP). Run 'housebridgectl diagnose' for connection tests.")
+    }
 
 case "list":
     let config = loadConfig()

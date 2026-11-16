@@ -36,7 +36,7 @@ Run `swift test --disable-sandbox` for the unit tests.
 
 1. `housebridgectl init` creates `~/.config/housebridge/config.yaml`. Edit the device IPs.
 2. **Hue:** `housebridgectl pair-hue`, then press the bridge's link button.
-3. **Lutron:** put the three PEM files from LEAP pairing (CA, cert, key) in `lutron.certs_dir`, or name them with `ca:`, `cert:`, and `key:`.
+3. **Lutron:** `housebridgectl pair-lutron <bridge-ip>`, then press the small button on the back of the bridge. It writes `ca.pem`, `cert.pem` and `key.pem` to `~/.config/housebridge/lutron` (`--out <dir>` to change; one folder per bridge). Point `lutron.certs_dir` at that folder, or name the files with `ca:`, `cert:`, and `key:`. Existing PEM files (e.g. from Home Assistant) work too.
 4. **UniFi:** create a *local* user, set `unifi.username`, then run `housebridgectl set-unifi-password`. The password is stored in the macOS Keychain.
 5. **HomeKit (optional):** add a `homekit:` section (see `config.yaml`), run `housebridgectl homekit` for the setup code, start HouseBridge, then in Home.app choose Add Accessory → More options and enter the code (the menu bar app also shows a QR code). Cameras and sensors appear as accessories of one bridge.
 6. `housebridgectl list lutron|hue|unifi` shows the exact device names to use in rules.
