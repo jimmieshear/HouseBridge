@@ -84,6 +84,19 @@ public enum Catalog {
                 } catch { result.problems[.unifi] = describeError(error) }
             }
         }
+        if let k = config.kasa {
+            // Plugs come from the config (nothing to discover); a reachable one also reports its model and state.
+            let hashes = k.credentialHashes()
+            for plug in k.plugs {
+                var model = "", state = "", problem: String?
+                do {
+                    let (info, mode) = try await withTimeout(15) { try await KasaDevice(host: plug.host, credentials: hashes).info() }
+                    model = info.model
+                    state = "\(info.isOn ? "on" : "off") via \(mode.rawValue)"
+                } catch { problem = describeError(error) }
+                result.entries.append(kasaEntry(plug, model: model, state: state, problem: problem))
+            }
+        }
         result.entries = fillGuesses(result.entries, hue: hueInv, picos: lutronInv?.picos ?? [])
         return result
     }
@@ -349,6 +362,34 @@ public enum Catalog {
     }
 
     // MARK: UniFi
+
+    static func kasaEntry(_ plug: KasaPlug, model: String, state: String, problem: String?) -> CatalogEntry {
+        let n = q(plug.name)
+        let snippet = lines([
+            "# Switch \(plug.name) on for 10 minutes when a remote button is pressed:",
+            "- name: \(plug.name) on for 10 minutes",
+            "  when: { pico: \"<remote>\", button: on, gesture: tap }",
+            "  then:",
+            "    - action: plug",
+            "      device: \(n)",
+            "      on: true",
+            "      off_after_seconds: 600",
+            "",
+            "# Switch it off again:",
+            "- name: \(plug.name) off",
+            "  when: { pico: \"<remote>\", button: off, gesture: tap }",
+            "  then:",
+            "    - action: plug",
+            "      device: \(n)",
+            "      on: false",
+        ])
+        var details = ["at \(plug.host)"]
+        if !state.isEmpty { details.append("now \(state)") }
+        if let problem { details.append("could not reach it: \(problem)") }
+        return CatalogEntry(id: "kasa:\(plug.name)", system: .kasa, kind: "Plug", name: plug.name, model: model, provides: [],
+                            accepts: ["action: plug — on / off", "off_after_seconds — switch off again after a delay"],
+                            details: details, snippet: snippet)
+    }
 
     static func unifiEntries(_ inv: ProtectInventory) -> [CatalogEntry] {
         inv.items.sorted { ($0.kind, $0.name) < ($1.kind, $1.name) }.map { i in
