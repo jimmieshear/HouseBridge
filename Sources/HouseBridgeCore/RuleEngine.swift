@@ -129,6 +129,13 @@ public actor RuleEngine {
     private let cancelLutronTimers: @Sendable ([String]) -> Void
     private let cancelPlugTimers: @Sendable ([String]) -> Void
     private let now: @Sendable () -> Date
+    private let catchUpOnStart: TimeInterval?
+    private let retryDelays: [TimeInterval]
+    private var retryTask: Task<Void, Never>?
+    private var retryKeys = Set<String>()
+
+    /// How long after a scheduled action fails (device unreachable) it is tried again; then it is given up.
+    public static let defaultRetryDelays: [TimeInterval] = [60, 300, 900]
 
     public init(config: Config, executor: ActionExecutor,
                 onEvent: @escaping @Sendable (TriggerEvent) -> Void = { _ in },
@@ -137,7 +144,11 @@ public actor RuleEngine {
                 cancelLutronTimers: @escaping @Sendable ([String]) -> Void = { _ in },
                 cancelPlugTimers: @escaping @Sendable ([String]) -> Void = { _ in },
                 now: @escaping @Sendable () -> Date = { Date() },
+                catchUpOnStart: TimeInterval? = nil,
+                retryDelays: [TimeInterval] = RuleEngine.defaultRetryDelays,
                 log: @escaping @Sendable (LogEntry) -> Void) {
+        self.catchUpOnStart = catchUpOnStart
+        self.retryDelays = retryDelays
         self.config = config
         self.executor = executor
         self.log = log
@@ -160,6 +171,13 @@ public actor RuleEngine {
     public func start() {
         guard runner == nil else { return }
         restoreHolds()
+        if let delay = catchUpOnStart {
+            // Gives Hue/Kasa a moment to connect; a failure is retried anyway.
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                await self?.catchUp(reason: "startup")
+            }
+        }
         if config.holidays.contains(where: \.enabled) { holidayTask = Task { [weak self] in await self?.runHolidays() } }
         for sim in config.simulations where sim.enabled {
             simulators.append(Task { [weak self] in await self?.simulate(sim) })
@@ -178,6 +196,9 @@ public actor RuleEngine {
         continuation.finish()
         runner?.cancel()
         runner = nil
+        retryTask?.cancel()
+        retryTask = nil
+        retryKeys = []
         holdTimers.values.forEach { $0.cancel() }
         holdTimers = [:]
         simulators.forEach { $0.cancel() }
@@ -452,6 +473,7 @@ public actor RuleEngine {
         let log = self.log
         let actions = rule.actions
         let name = rule.name
+        let isScheduled = rule.trigger.schedule != nil
 
         // Timers are settled here, in order, not inside the task: two rules firing together must not race.
         for action in actions { prepareLightTimer(for: action, keeping: rule.homekitSwitch); armLightTimer(for: action, rule: rule) }
@@ -468,10 +490,84 @@ public actor RuleEngine {
                     try await RuleEngine.run(action, executor: executor, log: log)
                 } catch {
                     log(LogEntry(level: .error, category: "rules", message: "‘\(name)’ action failed: \(error)"))
+                    // A scheduled change that did not happen is tried again, not forgotten until the next occurrence.
+                    if isScheduled { await self?.scheduleRetry(Set(action.targets.keys), attempt: 0) }
                 }
             }
         }
         _ = task
+    }
+
+    // MARK: Catch-up of scheduled state
+
+    /// Puts devices where the schedule says they should be *now*, for what edge-triggered `at:` rules can miss: the app
+    /// was not running or the Mac was asleep at the time, or the device was unreachable. Only at startup, after wake and
+    /// when a scheduled action failed, never on a timer, so a manual change in between is left alone.
+    /// Per device the most recent due rule wins, and only if it is a steady state (not `off_after_seconds`, toggles,
+    /// dimming). Rules paused by an active presence hold are skipped. `only` limits it to those device keys (retries).
+    func catchUp(reason: String, only: Set<String>? = nil, attempt: Int = 0) async {
+        struct Candidate { var at: Date; var rule: String; var action: Action; var steady: Bool }
+        let current = now()
+        var latest: [String: Candidate] = [:]
+        for rule in config.rules where rule.enabled {
+            guard let schedule = rule.trigger.schedule,
+                  let at = schedule.previous(onOrBefore: current, location: config.location),
+                  rule.between?.contains(at, location: config.location) ?? true,
+                  activeHold(pausing: rule) == nil else { continue }
+            for action in rule.actions {
+                let steady: Bool
+                switch action {
+                case .light(_, let state): steady = state.offAfterSeconds == nil
+                case .scene: steady = true
+                case .lutron(_, _, let off), .plug(_, _, let off): steady = off == nil
+                default: steady = false
+                }
+                for key in action.targets.keys where only?.contains(key) ?? true {
+                    if let existing = latest[key], existing.at > at { continue }
+                    latest[key] = Candidate(at: at, rule: rule.name, action: action, steady: steady)
+                }
+            }
+        }
+        var plan: [(at: Date, rule: String, action: Action, keys: [String])] = []
+        for (key, c) in latest.sorted(by: { ($0.value.at, $0.key) < ($1.value.at, $1.key) }) where c.steady {
+            if let i = plan.firstIndex(where: { $0.rule == c.rule && "\($0.action)" == "\(c.action)" }) { plan[i].keys.append(key) }
+            else { plan.append((c.at, c.rule, c.action, [key])) }
+        }
+        let executor = self.executor, log = self.log
+        var failed = Set<String>()
+        for item in plan {
+            log(LogEntry(category: "rules", message: "catch-up (\(reason)): ‘\(item.rule)’ was last due \(RuleEngine.format(item.at))"))
+            do { try await RuleEngine.run(item.action, executor: executor, log: log) }
+            catch {
+                log(LogEntry(level: .error, category: "rules", message: "catch-up ‘\(item.rule)’ failed: \(error)"))
+                failed.formUnion(item.keys)
+            }
+        }
+        if !failed.isEmpty { scheduleRetry(failed, attempt: attempt) }
+    }
+
+    private func scheduleRetry(_ keys: Set<String>, attempt: Int) {
+        guard !keys.isEmpty, runner != nil else { return }   // not after stop()
+        guard attempt < retryDelays.count else {
+            log(LogEntry(level: .error, category: "rules", message: "giving up on \(keys.sorted().joined(separator: ", ")); the next schedule time or restart will try again"))
+            return
+        }
+        retryKeys.formUnion(keys)
+        retryTask?.cancel()
+        let delay = retryDelays[attempt]
+        log(LogEntry(category: "rules", message: "will retry \(retryKeys.sorted().joined(separator: ", ")) in \(Int(delay)) s"))
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            if Task.isCancelled { return }
+            await self?.retry(attempt: attempt + 1)
+        }
+    }
+
+    private func retry(attempt: Int) async {
+        let keys = retryKeys
+        retryKeys = []
+        retryTask = nil
+        await catchUp(reason: "retry", only: keys, attempt: attempt)
     }
 
     // MARK: Holiday themes

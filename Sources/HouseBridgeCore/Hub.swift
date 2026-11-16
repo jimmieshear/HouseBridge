@@ -167,13 +167,15 @@ public final class Hub: @unchecked Sendable {
                                 holdStore: dryRun ? nil : HoldStore(url: paths.holdsFile),
                                 onSwitch: { relay.set($0, $1) },
                                 cancelLutronTimers: { [weak router] in router?.lutron?.cancelOffTimers(for: $0) },
-                                cancelPlugTimers: { [weak router] in router?.kasa?.cancelOffTimers(for: $0) }, log: log)
+                                cancelPlugTimers: { [weak router] in router?.kasa?.cancelOffTimers(for: $0) },
+                                catchUpOnStart: dryRun ? nil : 5, log: log)
         self.engine = engine
         Task { await engine.start() }
 
         let schedules = config.rules.filter(\.enabled).compactMap(\.trigger.schedule)
         if !schedules.isEmpty {
-            let scheduler = ClockScheduler(schedules: schedules, location: config.location, emit: { engine.submit($0) }, log: log)
+            let scheduler = ClockScheduler(schedules: schedules, location: config.location, emit: { engine.submit($0) },
+                                          onWake: { [dryRun] in if !dryRun { Task { await engine.catchUp(reason: "wake") } } }, log: log)
             tasks.append(Task { await scheduler.run() })
         }
 

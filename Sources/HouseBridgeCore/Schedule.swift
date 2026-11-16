@@ -165,10 +165,13 @@ public final class ClockScheduler: @unchecked Sendable {
     private let tick: Duration
     private let emit: @Sendable (TriggerEvent) -> Void
     private let log: @Sendable (LogEntry) -> Void
+    private let onWake: @Sendable () -> Void
 
     public init(schedules: [Schedule], location: GeoLocation?, calendar: Calendar = .current,
                 grace: TimeInterval = 300, tick: Duration = .seconds(10),
-                emit: @escaping @Sendable (TriggerEvent) -> Void, log: @escaping @Sendable (LogEntry) -> Void) {
+                emit: @escaping @Sendable (TriggerEvent) -> Void, onWake: @escaping @Sendable () -> Void = {},
+                log: @escaping @Sendable (LogEntry) -> Void) {
+        self.onWake = onWake
         var seen = Set<String>()
         self.schedules = schedules.filter { seen.insert($0.key).inserted }
         self.location = location
@@ -187,6 +190,8 @@ public final class ClockScheduler: @unchecked Sendable {
             try? await Task.sleep(for: tick)
             let now = Date()
             poll(from: last, to: now)
+            // A gap far longer than the tick means the Mac slept (or the clock jumped): schedule times may have passed.
+            if now.timeIntervalSince(last) > 60 { onWake() }
             last = now
         }
     }
