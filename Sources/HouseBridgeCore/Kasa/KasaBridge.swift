@@ -31,7 +31,7 @@ public final class KasaBridge: @unchecked Sendable {
                 log(LogEntry(category: "kasa", message: "‘\(plug.name)’ at \(plug.host): \(info.model) \(info.isOn ? "on" : "off") via \(mode.rawValue)"))
             } catch {
                 problems.append(plug.name)
-                log(LogEntry(level: .error, category: "kasa", message: "‘\(plug.name)’ at \(plug.host): \(describeError(error))"))
+                log(LogEntry(level: .error, category: "kasa", message: "‘\(plug.name)’ at \(plug.host): \(describeError(error))\(config.accountNote(for: error))"))
             }
         }
         if problems.isEmpty { status(.connected("\(reachable) plug\(reachable == 1 ? "" : "s")")) }
@@ -78,7 +78,7 @@ public final class KasaBridge: @unchecked Sendable {
                 let (info, mode) = try await device.info()
                 lines.append("  “\(plug.name)”  \(plug.host)  [\(info.model)] \(info.isOn ? "on" : "off"), protocol: \(mode.rawValue)")
             } catch {
-                lines.append("  “\(plug.name)”  \(plug.host)  unreachable: \(describeError(error))")
+                lines.append("  “\(plug.name)”  \(plug.host)  unreachable: \(describeError(error))\(config.accountNote(for: error))")
             }
         }
         return lines

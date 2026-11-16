@@ -87,10 +87,21 @@ public struct KasaConfig: Sendable {
         return Keychain.readPassword(host: Self.keychainHost, username: username, service: Self.keychainService)
     }
 
+    /// Appended to authentication failures: which account was tried and whether a password was found for it. The Keychain entry
+    /// is stored per username, so changing `username:` without re-running `set-kasa-password` silently leaves no password.
+    func accountNote(for error: Error) -> String {
+        guard case KasaError.auth = error else { return "" }
+        guard let username else { return "\n    no 'kasa.username' is set, so only a no-account plug would accept this." }
+        if resolvedPassword() == nil {
+            return "\n    account '\(username)': NO password found. Run: housebridgectl set-kasa-password (it saves it under the current username)."
+        }
+        return "\n    account '\(username)': a password was found and tried (both KLAP versions). The plug most likely belongs to a different Kasa account, or the e-mail/password differs from the one the plug last synced with the cloud."
+    }
+
     /// KLAP credential hashes to try: the account's, then the defaults of a plug with no account.
     func credentialHashes() -> [Data] {
         var hashes: [Data] = []
-        if let username, let password = resolvedPassword() { hashes.append(KlapCrypto.authHash(username: username, password: password)) }
+        if let username, let password = resolvedPassword() { hashes += KlapCrypto.authHashes(username: username, password: password) }
         return hashes + KlapCrypto.fallbackHashes
     }
 }

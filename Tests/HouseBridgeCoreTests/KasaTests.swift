@@ -21,6 +21,20 @@ final class KasaTests: XCTestCase {
         XCTAssertEqual(seq2, seq &+ 1)
     }
 
+    func testKlapV1HashVectorAndProofs() {
+        // md5(md5(user) + md5(password)), checked against Python hashlib.
+        let v1 = KlapCrypto.authHashV1(username: "a@b.c", password: "pw")
+        XCTAssertEqual(v1.map { String(format: "%02x", $0) }.joined(), "375e949ab68ef9492f765c4c1e4c7fb6")
+        let v2 = KlapCrypto.authHash(username: "a@b.c", password: "pw")
+        let local = Data(repeating: 1, count: 16), remote = Data(repeating: 2, count: 16)
+        // v1 proofs omit one seed; v2 proofs use both.
+        XCTAssertEqual(KlapCrypto.serverProof(local: local, remote: remote, auth: v1), KlapCrypto.sha256(local + v1))
+        XCTAssertEqual(KlapCrypto.clientProof(local: local, remote: remote, auth: v1), KlapCrypto.sha256(remote + v1))
+        XCTAssertEqual(KlapCrypto.serverProof(local: local, remote: remote, auth: v2), KlapCrypto.sha256(local + remote + v2))
+        XCTAssertEqual(KlapCrypto.clientProof(local: local, remote: remote, auth: v2), KlapCrypto.sha256(remote + local + v2))
+        XCTAssertEqual(KlapCrypto.authHashes(username: "a@b.c", password: "pw"), [v2, v1])
+    }
+
     func testReplyParsing() {
         let iot = Data(#"{"system":{"get_sysinfo":{"alias":"Patio","model":"KP125(US)","relay_state":1}}}"#.utf8)
         XCTAssertEqual(KasaCommand.parseIOTInfo(iot)?.isOn, true)

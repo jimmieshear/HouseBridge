@@ -90,16 +90,34 @@ enum KlapCrypto {
     static func sha1(_ d: Data) -> Data { Data(Insecure.SHA1.hash(data: d)) }
     static func sha256(_ d: Data) -> Data { Data(SHA256.hash(data: d)) }
 
-    /// KLAP v2 credential hash.
+    static func md5(_ d: Data) -> Data { Data(Insecure.MD5.hash(data: d)) }
+
+    /// KLAP v2 credential hash (32 bytes).
     static func authHash(username: String, password: String) -> Data {
         sha256(sha1(Data(username.utf8)) + sha1(Data(password.utf8)))
     }
 
+    /// KLAP v1 credential hash (16 bytes). Many Kasa plugs still use v1; `KlapTransport` tells the two apart by length.
+    static func authHashV1(username: String, password: String) -> Data {
+        md5(md5(Data(username.utf8)) + md5(Data(password.utf8)))
+    }
+
+    /// Both variants for one account, since a plug does not say which it speaks until handshake1.
+    static func authHashes(username: String, password: String) -> [Data] {
+        [authHash(username: username, password: password), authHashV1(username: username, password: password)]
+    }
+
     /// What a factory-fresh or "no account" plug accepts.
-    static let fallbackHashes: [Data] = [
-        authHash(username: "kasa@tp-link.net", password: "kasaSetup"),
-        authHash(username: "", password: ""),
-    ]
+    static let fallbackHashes: [Data] =
+        authHashes(username: "kasa@tp-link.net", password: "kasaSetup") + authHashes(username: "", password: "")
+
+    /// What a plug sends back in handshake1 to prove it knows `auth`, and what handshake2 must answer. v1 (16-byte hash) omits a seed.
+    static func serverProof(local: Data, remote: Data, auth: Data) -> Data {
+        auth.count == 16 ? sha256(local + auth) : sha256(local + remote + auth)
+    }
+    static func clientProof(local: Data, remote: Data, auth: Data) -> Data {
+        auth.count == 16 ? sha256(remote + auth) : sha256(remote + local + auth)
+    }
 
     static func aes(_ op: Int, key: Data, iv: Data, _ input: Data) -> Data? {
         var out = Data(count: input.count + kCCBlockSizeAES128)
@@ -206,10 +224,10 @@ actor KlapTransport {
             cookie = String(part).trimmingCharacters(in: .whitespaces)
         }
         let remote = reply.prefix(16), serverHash = reply.suffix(32)
-        guard let auth = candidates.first(where: { KlapCrypto.sha256(local + remote + $0) == serverHash }) else {
-            throw KasaError.auth("the plug rejected the account. Set 'kasa.username' to your Kasa/TP-Link account e-mail and store its password with: housebridgectl set-kasa-password")
+        guard let auth = candidates.first(where: { KlapCrypto.serverProof(local: local, remote: Data(remote), auth: $0) == serverHash }) else {
+            throw KasaError.auth("the plug rejected the account (tried KLAP v1 and v2). Check the e-mail and password, then set 'kasa.username' to your Kasa/TP-Link account e-mail and store its password with: housebridgectl set-kasa-password")
         }
-        let (_, ack) = try await post("/app/handshake2", KlapCrypto.sha256(remote + local + auth))
+        let (_, ack) = try await post("/app/handshake2", KlapCrypto.clientProof(local: local, remote: Data(remote), auth: auth))
         guard ack.statusCode == 200 else { throw KasaError.protocolError("handshake2 returned HTTP \(ack.statusCode)") }
         session = KlapSession(local: local, remote: Data(remote), authHash: auth)
     }
