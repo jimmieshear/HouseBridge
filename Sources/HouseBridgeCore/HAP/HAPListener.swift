@@ -87,9 +87,11 @@ final class HAPListener {
             connection.localAddress = Self.plainAddress(host)
         }
         nw.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, complete, error in
+            // The listener is gone after stop()/reload; its server may be freed, so don't feed it more bytes.
+            guard let self else { nw.cancel(); return }
             if let data, !data.isEmpty { connection.receive(data) }
             if complete || error != nil { nw.cancel(); return }
-            self?.receive(nw, connection)
+            self.receive(nw, connection)
         }
     }
 }

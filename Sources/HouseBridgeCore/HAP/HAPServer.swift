@@ -181,6 +181,8 @@ enum HAPStatus {
 
 final class HAPConnection {
     private unowned let server: HAPServer
+    /// Weak twin of `server` for teardown: the transport's close callback can arrive after a reload has freed the server.
+    private weak var owner: HAPServer?
     /// Set by the transport: write bytes to the socket (and optionally close afterwards) / close it.
     var send: (Data, _ thenClose: Bool) -> Void = { _, _ in }
     var close: () -> Void = {}
@@ -202,7 +204,7 @@ final class HAPConnection {
     private var srpAuthenticated = false
     private var verifyState: (shared: Data, accessoryPublic: Data, controllerPublic: Data, key: SymmetricKey)?
 
-    init(server: HAPServer) { self.server = server }
+    init(server: HAPServer) { self.server = server; owner = server }
 
     var isSecure: Bool { session != nil }
 
@@ -210,7 +212,7 @@ final class HAPConnection {
 
     func connectionDidClose() {
         closed = true
-        server.connectionClosed(self)
+        owner?.connectionClosed(self)
     }
 
     // MARK: Input
