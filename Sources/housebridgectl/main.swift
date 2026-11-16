@@ -26,8 +26,10 @@ func usage() -> Never {
       import-homebridge    Read a running Homebridge's config (found over Bonjour and its web UI, or --from-file) and add it to your HouseBridge config
                            (appends the missing unifi:/homekit: sections to an existing config, never overwrites; creates one if absent)
                            [--from-file <config.json>] [--ui <http://host:8581>] [--ui-user <name>] [--out <file>] [--print] [--store-password]
+      pair-matter <code> [--name <label>]  Join a Matter device that is already in Apple Home (Home.app: accessory → Settings → Turn On Pairing Mode, then pass the code)
+      unpair-matter <node>  Forget a Matter node this Mac joined (it stays in Apple Home)
       homekit [--reset]    Show the code for adding HouseBridge to Home.app and who is paired (--reset forgets everything)
-      list lutron|hue|unifi|kasa  Show (add --raw to lutron to dump the bridge's raw replies) the devices, buttons, lights, scenes or cameras you can use in rules
+      list lutron|hue|unifi|kasa|matter  Show (add --raw to lutron to dump the bridge's raw replies) the devices, buttons, lights, scenes or cameras you can use in rules
       camera-test [name] [--seconds N]  Check what HomeKit live view needs, camera by camera: snapshot, RTSP stream, H.264 and audio (run it on the Mac that runs HouseBridge)
       devices [--brief] [--save]  List every Lutron, Hue and UniFi device: what it reports, what you can do with it, example rules
       diagnose [--save]    Print a report (config, certificates, live connection tests, recent log) to share when something fails
@@ -446,7 +448,59 @@ case "pair-lutron":
         fail("Lutron pairing failed: \(describeError(error))\nCheck the IP, that this Mac is on the bridge's LAN, and that it is a Smart Bridge Pro or RA2 Select (LEAP). Run 'housebridgectl diagnose' for connection tests.")
     }
 
+case "pair-matter":
+    guard let code = args.dropFirst().first, !code.hasPrefix("-") else { fail("Give the pairing code: housebridgectl pair-matter <code> [--name <label>]") }
+    let label = takeOption("--name")
+    do { _ = try MatterController.parse(code: code) } catch { fail("\(error)") }
+    let matter = MatterController(store: MatterStore(url: paths.matterFile), log: { fileLog.write($0) })
+    do {
+        try matter.start()
+        print("Pairing… (up to 2 minutes; keep the device powered and this Mac on its network)")
+        let node = try await matter.pair(code: code, name: label)
+        print("Paired as node \(node)\(label.map { " (“\($0)”)" } ?? ""). Next: housebridgectl list matter")
+        matter.stop()
+        exit(0)
+    } catch {
+        matter.stop()
+        fail("Matter pairing failed: \(describeError(error))\nGet a fresh code from Home.app (Turn On Pairing Mode) and check 'housebridgectl logs'. macOS may ask for Local Network permission.")
+    }
+
+case "unpair-matter":
+    guard let id = args.dropFirst().first.flatMap(UInt64.init) else { fail("Give the node number shown by 'list matter'.") }
+    let matter = MatterController(store: MatterStore(url: paths.matterFile), log: { fileLog.write($0) })
+    try? matter.start()
+    matter.unpair(node: id)
+    matter.stop()
+    print("Forgot node \(id) here. It is still paired to Apple Home.")
+    exit(0)
+
 case "list":
+    if args.dropFirst().first == "matter" {
+        let matter = MatterController(store: MatterStore(url: paths.matterFile), log: { fileLog.write($0) })
+        guard !matter.store.nodes.isEmpty else { fail("No Matter devices yet. Run: housebridgectl pair-matter <code>") }
+        do { try matter.start() } catch { fail("\(error)") }
+        for node in matter.store.nodes {
+            print("\nNode \(node.id)" + (node.name.map { " “\($0)”" } ?? ""))
+            do {
+                let all = try await matter.readEverything(node: node.id)
+                for ep in all.keys.sorted() {
+                    var heading = "  endpoint \(ep)"
+                    // Descriptor (0x1D) attribute 0 = DeviceTypeList: {0: type, 1: revision} entries.
+                    if let list = all[ep]?[0x1D]?[0] { heading += "  device types: " + list }
+                    print(heading)
+                    for cl in all[ep]!.keys.sorted() {
+                        print("    cluster 0x\(String(cl, radix: 16, uppercase: true)) \(MatterNames.clusters[cl].map { "(\($0))" } ?? "")")
+                        // 0xFFF8-0xFFFD are the global list/feature attributes; skip the noise but show real values.
+                        for (attr, value) in all[ep]![cl]!.sorted(by: { $0.key < $1.key }) where attr < 0xFFF0 {
+                            print("      0x\(String(attr, radix: 16, uppercase: true)) = \(value.prefix(160))")
+                        }
+                    }
+                }
+            } catch { print("  could not read: \(describeError(error))") }
+        }
+        matter.stop()
+        exit(0)
+    }
     let config = loadConfig()
     guard let what = rest.first else { usage() }
     do {
