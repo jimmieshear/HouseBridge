@@ -21,6 +21,7 @@ func usage() -> Never {
       run [--dry-run]      Run the bridge (Ctrl-C to stop). --dry-run logs actions instead of changing lights.
       set-unifi-password   Store the UniFi password in the macOS Keychain (--delete removes it)
       set-kasa-password    Store the Kasa/TP-Link account password in the macOS Keychain (--delete removes it)
+      forget-host [<ip>]   Forget the pinned TLS certificate of a Hue/UniFi host (after a firmware update or reset); no argument lists pinned hosts
       pair-hue             Pair with the Hue bridge (press its link button first)
       pair-lutron [<ip>] [--out <dir>]  Pair with a Lutron Smart Bridge (Pro/RA2 Select) and write ca.pem, cert.pem, key.pem (default: <config home>/lutron)
       import-homebridge    Read a running Homebridge's config (found over Bonjour and its web UI, or --from-file) and add it to your HouseBridge config
@@ -221,6 +222,17 @@ case "run":
 
 case "events":
     await runHub(printEventsOnly: true)
+
+case "forget-host":
+    let known = KnownHosts(url: paths.knownHostsFile)
+    guard let host = rest.first(where: { !$0.hasPrefix("-") }) else {
+        let names = known.knownHostNames()
+        print(names.isEmpty ? "No pinned hosts." : "Pinned hosts:\n" + names.map { "  \($0)" }.joined(separator: "\n"))
+        exit(0)
+    }
+    guard known.knownHostNames().contains(host) else { fail("\(host) is not pinned. Pinned: \(known.knownHostNames().joined(separator: ", "))") }
+    known.forget(host: host)
+    print("Forgot \(host). The next connection pins whatever certificate it presents; restart HouseBridge.")
 
 case "set-unifi-password":
     let config = loadConfig()

@@ -10,6 +10,7 @@ public enum HueError: Error, CustomStringConvertible {
     case linkButtonNotPressed
     case notFound(kind: String, name: String, available: [String])
     case http(HTTPFailure)
+    case certificateChanged(host: String)
 
     public var description: String {
         switch self {
@@ -18,6 +19,8 @@ public enum HueError: Error, CustomStringConvertible {
         case .notFound(let kind, let name, let available):
             return "No Hue \(kind) named “\(name)”. Available: \(available.sorted().joined(separator: ", "))"
         case .http(let f): return "Hue bridge error: \(f)"
+        case .certificateChanged(let host):
+            return "The Hue bridge at \(host) presented a different certificate than the one pinned on first use (a bridge firmware update or reset does this). If you trust it, run: housebridgectl forget-host \(host)"
         }
     }
 }
@@ -45,11 +48,13 @@ public struct HueInventory: Sendable {
 public final class HueClient: @unchecked Sendable {
     public let credentials: HueCredentials
     private let session: URLSession
+    private let hosts: KnownHosts
     private let lock = NSLock()
     private var cache: HueInventory?
 
     public init(credentials: HueCredentials, hosts: KnownHosts) {
         self.credentials = credentials
+        self.hosts = hosts
         session = URLSession(configuration: .ephemeral, delegate: PinningDelegate(hosts: hosts), delegateQueue: nil)
     }
 
@@ -100,7 +105,11 @@ public final class HueClient: @unchecked Sendable {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await session.data(for: request)
+        let data: Data, response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch let error as URLError where error.code == .cancelled && hosts.takeMismatch(host: credentials.host) {
+            throw HueError.certificateChanged(host: credentials.host)
+        }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
             throw HueError.http(HTTPFailure(status: status, body: String(decoding: data, as: UTF8.self)))

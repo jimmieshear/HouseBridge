@@ -8,6 +8,7 @@ public final class KnownHosts: @unchecked Sendable {
     private let url: URL
     private let lock = NSLock()
     private var map: [String: String]
+    private var mismatched: Set<String> = []
 
     public init(url: URL) {
         self.url = url
@@ -23,7 +24,11 @@ public final class KnownHosts: @unchecked Sendable {
 
     func verify(host: String, fingerprint: String) -> Verdict {
         lock.lock(); defer { lock.unlock() }
-        if let known = map[host] { return known == fingerprint ? .trusted : .mismatch }
+        if let known = map[host] {
+            if known == fingerprint { return .trusted }
+            mismatched.insert(host)
+            return .mismatch
+        }
         map[host] = fingerprint
         if let data = try? JSONEncoder().encode(map) {
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -31,6 +36,17 @@ public final class KnownHosts: @unchecked Sendable {
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         }
         return .newlyTrusted
+    }
+
+    /// True once if the last refused connection to `host` was a pin mismatch (URLSession reports it only as "cancelled").
+    func takeMismatch(host: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return mismatched.remove(host) != nil
+    }
+
+    public func knownHostNames() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return map.keys.sorted()
     }
 
     public func forget(host: String) {
