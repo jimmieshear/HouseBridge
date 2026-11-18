@@ -5,6 +5,8 @@ import Foundation
 public struct Config: Sendable {
     public var lutron: LutronConfig?
     public var hue: HueConfig?
+    /// The color temperature lights should have when on; see `LightDefaults`.
+    public var lightDefaults: LightDefaults?
     public var unifi: UnifiConfig?
     public var kasa: KasaConfig?
     public var homekit: HomeKitConfig?
@@ -246,7 +248,7 @@ public enum ConfigLoader {
         let root = try YAML.parse(text)
         guard case .map(let top) = root else { throw ConfigError(path: "", message: "top level must be a map") }
         let r = Reader(map: top, path: "")
-        try r.rejectUnknown(["lutron", "hue", "unifi", "kasa", "homekit", "location", "presence", "simulate", "holidays", "alarms", "timing", "rules"])
+        try r.rejectUnknown(["lutron", "hue", "light_defaults", "unifi", "kasa", "homekit", "location", "presence", "simulate", "holidays", "alarms", "timing", "rules"])
 
         var config = Config()
         if let l = try r.reader("lutron") {
@@ -268,6 +270,7 @@ public enum ConfigLoader {
             try h.rejectUnknown(["host"])
             config.hue = HueConfig(host: try h.requireString("host"))
         }
+        if let d = try r.reader("light_defaults") { config.lightDefaults = try LightDefaults.parse(d) }
         if let u = try r.reader("unifi") {
             try u.rejectUnknown(["host", "username", "password", "password_env", "clear_after_seconds"])
             var cfg = UnifiConfig(host: try u.requireString("host"), username: try u.requireString("username"))
@@ -415,6 +418,9 @@ public enum ConfigLoader {
         }
         if let kasa = config.kasa, config.homekit == nil, let plug = kasa.plugs.first(where: \.homekit) {
             throw ConfigError(path: "kasa.plugs", message: "plug '\(plug.name)' has 'homekit: true', which needs a 'homekit:' section")
+        }
+        if config.lightDefaults != nil && config.hue == nil {
+            throw ConfigError(path: "light_defaults", message: "sets the color temperature of Hue lights, so it needs a 'hue:' section")
         }
         for rule in config.rules {
             guard let name = rule.homekitSwitch else { continue }

@@ -37,7 +37,13 @@ public struct HueInventory: Sendable {
         /// For rooms and zones: ids of the lights inside.
         public var lightIds: [String] = []
     }
-    public struct SceneItem: Sendable { public let id: String; public let name: String; public let groupName: String? }
+    public struct SceneItem: Sendable {
+        public let id: String
+        public let name: String
+        public let groupName: String?
+        /// The white temperature the scene sets, e.g. "2900 K" or "2700–3200 K"; nil when it sets none.
+        public var temperature: String? = nil
+    }
     public var lights: [Item] = []
     public var rooms: [Item] = []
     public var zones: [Item] = []
@@ -118,6 +124,33 @@ public final class HueClient: @unchecked Sendable {
         return object?["data"] as? [JSON] ?? []
     }
 
+    // MARK: State
+
+    /// Every light that can show a white temperature, with whether it is on and what it is showing.
+    public func lightStates() async throws -> [HueLightState] {
+        try await request("GET", "/resource/light").compactMap { l in
+            guard let id = l["id"] as? String, let name = (l["metadata"] as? JSON)?["name"] as? String,
+                  let ct = l["color_temperature"] as? JSON else { return nil }
+            let schema = ct["mirek_schema"] as? JSON
+            return HueLightState(id: id, name: name, on: (l["on"] as? JSON)?["on"] as? Bool ?? false,
+                                 mirek: (ct["mirek_valid"] as? Bool ?? false) ? ct["mirek"] as? Int : nil,
+                                 minMirek: schema?["mirek_minimum"] as? Int ?? 153, maxMirek: schema?["mirek_maximum"] as? Int ?? 500)
+        }
+    }
+
+    /// Ids of the rooms and zones that currently have a scene recalled.
+    public func activeSceneGroups() async throws -> Set<String> {
+        Set(try await request("GET", "/resource/scene").compactMap { s in
+            guard let active = (s["status"] as? JSON)?["active"] as? String, active != "inactive" else { return nil }
+            return (s["group"] as? JSON)?["rid"] as? String
+        })
+    }
+
+    public func setColorTemperature(lightID: String, mirek: Int, transitionMs: Int = 400) async throws {
+        _ = try await request("PUT", "/resource/light/\(lightID)",
+                              body: ["color_temperature": ["mirek": mirek], "dynamics": ["duration": transitionMs]])
+    }
+
     // MARK: Inventory
 
     public func inventory(refresh: Bool = false) async throws -> HueInventory {
@@ -193,13 +226,24 @@ public final class HueClient: @unchecked Sendable {
             guard let id = z["id"] as? String, let n = (z["metadata"] as? JSON)?["name"] as? String else { return nil }
             var item = HueInventory.Item(id: id, name: n, groupedLightId: groupedLight(z))
             item.details = ["lights: " + (members(z).joined(separator: ", ").isEmpty ? "none" : members(z).joined(separator: ", "))]
+            item.lightIds = ((z["children"] as? [JSON]) ?? []).compactMap { c in
+                (c["rid"] as? String).flatMap { lightNameById[$0] != nil ? $0 : lightIdByOwner[$0] }
+            }
             return item
         }
         let groupNames = named(rooms).merging(named(zones)) { a, _ in a }
         inv.scenes = scenes.compactMap { s in
             guard let id = s["id"] as? String, let n = (s["metadata"] as? JSON)?["name"] as? String else { return nil }
             let group = (s["group"] as? JSON)?["rid"] as? String
-            return .init(id: id, name: n, groupName: group.flatMap { groupNames[$0] })
+            let mireks = ((s["actions"] as? [JSON]) ?? []).compactMap {
+                (((($0["action"] as? JSON)?["color_temperature"]) as? JSON)?["mirek"]) as? Int
+            }
+            var item = HueInventory.SceneItem(id: id, name: n, groupName: group.flatMap { groupNames[$0] })
+            if let lo = mireks.max(), let hi = mireks.min() {   // high mirek = low kelvin
+                let a = Int((1_000_000 / Double(lo)).rounded()), b = Int((1_000_000 / Double(hi)).rounded())
+                item.temperature = a == b ? "\(a) K" : "\(a)–\(b) K"
+            }
+            return item
         }
         lock.withLock { cache = inv }
         return inv

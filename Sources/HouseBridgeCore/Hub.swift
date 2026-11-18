@@ -136,6 +136,10 @@ public final class Hub: @unchecked Sendable {
             if let creds = HueClient.load(from: paths.hueFile), creds.host == hue.host {
                 let client = HueClient(credentials: creds, hosts: hosts)
                 executor = HueActions(client: client)
+                if let defaults = config.lightDefaults {
+                    let verifier = LightTemperatureVerifier(client: client, defaults: defaults, log: log)
+                    tasks.append(Task { await verifier.run() })
+                }
                 status(.hue, .connecting)
                 tasks.append(Task {
                     do {

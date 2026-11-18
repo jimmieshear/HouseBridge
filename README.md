@@ -54,6 +54,7 @@ Each rule has a `when:` trigger and a list of `then:` actions.
 | **Per rule** | `between`, `cooldown_seconds`, `enabled`, `homekit_switch` |
 | **Home.app switch** | `homekit_switch: Name` on a rule that has a `light` action with `off_after_seconds` publishes a switch to Home.app (needs `homekit:`). It turns on when the rule fires and off when the auto-off timer ends. Turning it on in Home.app runs the rule's actions (ignoring its time window and presence holds), so the same timeout applies; turning it off cancels the timer and switches the lights off. Several rules can share one name |
 | **Kasa plug in Home.app** | `homekit: true` on a plug under `kasa: plugs:` (needs `homekit:`) publishes it to Home.app as an Outlet on the HouseBridge bridge, for plugs that have no HomeKit of their own. Home.app on/off goes to the plug over the LAN; changes from rules, the Kasa app or the plug's button show up in Home.app within a minute |
+| **Default light temperature** | `light_defaults: { kelvin: 3000 }` keeps every Hue light that is on at that white temperature, checked every `check_seconds` (30) with a `tolerance_kelvin` (100). `overrides:` take `light:`, `zone:` or `room:` plus `kelvin:` or `ignore: true`; the most specific wins. Lights showing a color, or in a room/zone with a Hue scene recalled, are left alone. `housebridgectl list hue` shows the temperature each scene sets, so you can copy the one you like (for example Bright) |
 
 ### Time of day and sunrise/sunset
 

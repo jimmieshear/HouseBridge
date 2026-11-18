@@ -548,7 +548,8 @@ case "list":
             print("Lights:");  inv.lights.forEach { print("  “\($0.name)”") }
             print("Rooms:");   inv.rooms.forEach { print("  “\($0.name)”") }
             print("Zones:");   inv.zones.forEach { print("  “\($0.name)”") }
-            print("Scenes (room: scene):"); inv.scenes.forEach { print("  “\($0.groupName ?? "?")”: “\($0.name)”") }
+            print("Scenes (room: scene, and the white temperature it sets):")
+            inv.scenes.forEach { print("  “\($0.groupName ?? "?")”: “\($0.name)”" + ($0.temperature.map { "  \($0)" } ?? "")) }
         case "unifi":
             guard let u = config.unifi else { fail("No 'unifi:' section in config.") }
             let inv = try await ProtectClient(config: u, hosts: KnownHosts(url: paths.knownHostsFile)).discover()
