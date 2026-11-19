@@ -98,5 +98,15 @@ func parseJSON(_ data: Data) throws -> Any {
 public struct HTTPFailure: Error, CustomStringConvertible {
     public let status: Int
     public let body: String
-    public var description: String { "HTTP \(status): \(body.prefix(200))" }
+    public var description: String { "HTTP \(status): \(summary)" }
+
+    /// Proxies answer with a page of HTML (`<title>429 Too Many Requests</title>`); show just the title.
+    private var summary: String {
+        if let open = body.range(of: "<title>", options: .caseInsensitive),
+           let close = body.range(of: "</title>", options: .caseInsensitive, range: open.upperBound..<body.endIndex) {
+            return String(body[open.upperBound..<close.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return String(body.prefix(200))
+    }
+    public var isRateLimited: Bool { status == 429 }
 }

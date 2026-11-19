@@ -76,3 +76,34 @@ final class LightDefaultsTests: XCTestCase {
         XCTAssertEqual(plan.first?.toMirek, 300)
     }
 }
+
+final class RequestGateTests: XCTestCase {
+    private actor Counter {
+        var now = 0, peak = 0
+        func enter() { now += 1; peak = max(peak, now) }
+        func leave() { now -= 1 }
+    }
+
+    func testNeverRunsMoreThanLimitAtOnce() async throws {
+        let gate = RequestGate(limit: 2), counter = Counter()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    try? await gate.run {
+                        await counter.enter()
+                        try await Task.sleep(for: .milliseconds(20))
+                        await counter.leave()
+                    }
+                }
+            }
+        }
+        let peak = await counter.peak
+        XCTAssertEqual(peak, 2)
+    }
+
+    func testHTMLErrorPageIsSummarisedByItsTitle() {
+        let failure = HTTPFailure(status: 429, body: "<html>\r\n<head><title>429 Too Many Requests</title></head>\r\n<body>…</body></html>")
+        XCTAssertEqual(failure.description, "HTTP 429: 429 Too Many Requests")
+        XCTAssertTrue(failure.isRateLimited)
+    }
+}

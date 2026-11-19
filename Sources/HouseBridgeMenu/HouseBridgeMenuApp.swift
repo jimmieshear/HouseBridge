@@ -11,6 +11,8 @@ final class AppModel: ObservableObject {
     @Published var activity: [LogEntry] = []
     @Published var configError: String?
     @Published var ruleCount = 0
+    /// Occurrences the person skipped (`Upcoming.skipKey`); the engine keeps the same set on disk.
+    @Published var skippedKeys: Set<String> = []
     /// Setup code and pairing state for the HomeKit bridge, when one is configured.
     @Published var homeKit: HomeKitPairingInfo?
 
@@ -93,6 +95,7 @@ final class AppModel: ObservableObject {
                               Task { @MainActor in self?.append(LogEntry(category: "event", message: e.summary)) }
                           })
             self.hub = hub
+            skippedKeys = Set(HoldStore(url: paths.skipsFile).load().keys)
             hub.start()
             append(LogEntry(category: "config", message: "loaded \(config.rules.count) rule(s)"))
         } catch {
@@ -110,6 +113,23 @@ final class AppModel: ObservableObject {
         activity.insert(entry, at: 0)
         if activity.count > 60 { activity.removeLast(activity.count - 60) }
     }
+
+    /// Everything automatic that is coming up (see `Upcoming`).
+    func upcomingEvents(now: Date) -> [UpcomingEvent] {
+        guard let config = currentConfig else { return [] }
+        return Upcoming.events(config: config, holds: HoldStore(url: paths.holdsFile).load(), skips: skippedKeys, now: now)
+    }
+
+    /// Skips this one occurrence of a scheduled rule (or takes the skip back); later occurrences are unaffected.
+    func setSkipped(_ event: UpcomingEvent, _ skipped: Bool) {
+        guard let rule = event.ruleName else { return }
+        let key = Upcoming.skipKey(rule, event.date)
+        if skipped { skippedKeys.insert(key) } else { skippedKeys.remove(key) }
+        hub?.skipRule(rule, at: event.date, undo: !skipped)
+    }
+
+    /// Runs a scheduled rule right now; it stays in place until the schedule next changes those devices.
+    func runNow(_ ruleName: String) { hub?.runRuleNow(ruleName) }
 
     func quit() { hub?.stop(); NSApplication.shared.terminate(nil) }
 }
@@ -131,110 +151,33 @@ struct HouseBridgeMenuApp: App {
         }
         .menuBarExtraStyle(.window)
 
+        Window("HouseBridge", id: "main") {
+            MainWindowView(model: model)
+        }
+        .defaultSize(width: 920, height: 720)
+        .defaultLaunchBehavior(.suppressed)   // a menu bar app: the window opens from the menu, not at launch
+
         Window("HouseBridge Devices", id: "devices") {
             DevicesView(model: model)
         }
     }
 }
 
+/// The menu bar menu only opens the window (or quits); everything else lives in the window.
 struct MenuContent: View {
     @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
-    private static let time: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f
-    }()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("HouseBridge").font(.headline)
-
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(Subsystem.allCases, id: \.self) { sub in
-                    let status = model.statuses[sub] ?? .notConfigured
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Circle().fill(color(for: status)).frame(width: 8, height: 8)
-                        Text(sub == .homekit ? "HomeKit" : sub.rawValue.capitalized).frame(width: 64, alignment: .leading)
-                        Text(status.label).foregroundStyle(.secondary).lineLimit(3)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .font(.callout)
-                }
+        VStack(spacing: 8) {
+            Button("Open HouseBridge") {
+                openWindow(id: "main")
+                NSApplication.shared.activate(ignoringOtherApps: true)
             }
-
-            if let info = model.homeKit, !info.isPaired {
-                HStack(spacing: 10) {
-                    if let qr = Self.qrImage(info.setupURI) { Image(nsImage: qr).interpolation(.none).resizable().frame(width: 96, height: 96) }
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Add to Home.app").font(.subheadline)
-                        Text(info.setupCode).font(.system(.title3, design: .monospaced)).textSelection(.enabled)
-                        Text("Scan the code, or choose More options and type it in.").font(.caption).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-
-            if let error = model.configError {
-                Text("Config problem — still running the previous version:\n\(error)")
-                    .font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("\(model.ruleCount) rule(s) loaded").font(.caption).foregroundStyle(.secondary)
-            }
-
-            Divider()
-            Text("Recent activity").font(.subheadline)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    if model.activity.isEmpty { Text("Nothing yet").foregroundStyle(.secondary) }
-                    ForEach(model.activity.prefix(30)) { entry in
-                        Text("\(Self.time.string(from: entry.date))  \(entry.category): \(entry.message)")
-                            .foregroundStyle(entry.level == .error ? .red : entry.level == .warning ? .orange : .primary)
-                            .lineLimit(2)
-                    }
-                }
-                .font(.system(size: 11, design: .monospaced))
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(height: 170)
-
-            Divider()
-            HStack {
-                Button("Edit Config") { NSWorkspace.shared.open(model.configPath) }
-                Button("Reload") { model.reload() }
-                Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([model.configPath]) }
-            }
-            HStack {
-                Button(model.diagnosticsBusy ? "Testing…" : "Copy Diagnostics") { model.copyDiagnostics() }
-                    .disabled(model.diagnosticsBusy)
-                Button("Open Logs") { NSWorkspace.shared.open(model.logsFolder) }
-                Button("Devices…") {
-                    openWindow(id: "devices")
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                }
-                Spacer()
-                Button("Quit") { model.quit() }
-            }
+            .keyboardShortcut(.defaultAction)
+            Button("Quit") { model.quit() }
         }
         .padding(12)
-        .frame(width: 420)
-    }
-
-    private static func qrImage(_ text: String) -> NSImage? {
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(text.utf8)
-        filter.correctionLevel = "M"
-        guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)) else { return nil }
-        let rep = NSCIImageRep(ciImage: output)
-        let image = NSImage(size: rep.size)
-        image.addRepresentation(rep)
-        return image
-    }
-
-    private func color(for status: ConnectionStatus) -> Color {
-        switch status {
-        case .connected: return .green
-        case .connecting: return .yellow
-        case .notConfigured: return .gray
-        case .disconnected, .needsSetup: return .red
-        }
+        .frame(width: 200)
     }
 }

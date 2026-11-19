@@ -95,3 +95,22 @@ final class KasaTests: XCTestCase {
         XCTAssertEqual(on?.perms, ["pr", "pw", "ev"])
     }
 }
+
+private final class StatusLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _items: [ConnectionStatus] = []
+    var items: [ConnectionStatus] { lock.withLock { _items } }
+    func add(_ s: ConnectionStatus) { lock.withLock { _items.append(s) } }
+}
+
+final class KasaMonitorTests: XCTestCase {
+    func testUnreachablePlugTurnsStatusRedOnceAndKeepsWatching() async throws {
+        let config = try XCTUnwrap(ConfigLoader.parse("kasa:\n  plugs:\n    - { name: Gone, host: 127.0.0.1 }\n").kasa)
+        let statuses = StatusLog()
+        let bridge = KasaBridge(config: config, log: { _ in }, status: { statuses.add($0) })
+        let task = Task { await bridge.monitor() }
+        defer { task.cancel() }
+        for _ in 0..<80 where !statuses.items.contains(.disconnected("can't reach Gone")) { try await Task.sleep(for: .milliseconds(100)) }
+        XCTAssertEqual(statuses.items, [.connecting, .disconnected("can't reach Gone")])   // reported once, not on every pass
+    }
+}

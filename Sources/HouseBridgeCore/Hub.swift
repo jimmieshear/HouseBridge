@@ -141,14 +141,28 @@ public final class Hub: @unchecked Sendable {
                     tasks.append(Task { await verifier.run() })
                 }
                 status(.hue, .connecting)
+                // Keeps the status honest: a cheap ping every minute while healthy; while down, a retry every 30 s that
+                // reloads the inventory on success. Each outage and recovery is logged once.
                 tasks.append(Task {
-                    do {
-                        let inv = try await client.inventory()
-                        status(.hue, .connected("\(inv.lights.count) lights, \(inv.rooms.count) rooms, \(inv.scenes.count) scenes"))
-                    } catch {
-                        let hint = localNetworkHint(for: error, host: hue.host)
-                        log(LogEntry(level: .error, category: "hue", message: describeError(error) + (hint.map { "\n" + $0 } ?? "")))
-                        status(.hue, .disconnected(hint != nil ? "can't reach \(hue.host) — check Local Network permission (see log)" : "\(error)"))
+                    var healthy = false, failedBefore = false
+                    while !Task.isCancelled {
+                        do {
+                            if healthy { try await client.ping() }
+                            else {
+                                let inv = try await client.inventory(refresh: true)
+                                status(.hue, .connected("\(inv.lights.count) lights, \(inv.rooms.count) rooms, \(inv.scenes.count) scenes"))
+                                if failedBefore { log(LogEntry(category: "hue", message: "Hue bridge is reachable again")) }
+                                healthy = true; failedBefore = false
+                            }
+                        } catch {
+                            if healthy || !failedBefore {
+                                let hint = localNetworkHint(for: error, host: hue.host)
+                                log(LogEntry(level: .error, category: "hue", message: describeError(error) + (hint.map { "\n" + $0 } ?? "")))
+                                status(.hue, .disconnected(hint != nil ? "can't reach \(hue.host) — check Local Network permission (see log)" : "\(error)"))
+                            }
+                            healthy = false; failedBefore = true
+                        }
+                        try? await Task.sleep(for: .seconds(healthy ? 60 : 30))
                     }
                 })
             } else {
@@ -170,6 +184,8 @@ public final class Hub: @unchecked Sendable {
         let snapshotRelay = SnapshotRelay()
         let engine = RuleEngine(config: config, executor: router, onEvent: eventSink,
                                 holdStore: dryRun ? nil : HoldStore(url: paths.holdsFile),
+                                overrideStore: dryRun ? nil : HoldStore(url: paths.overridesFile),
+                                skipStore: dryRun ? nil : HoldStore(url: paths.skipsFile),
                                 onSwitch: { relay.set($0, $1) },
                                 cancelLutronTimers: { [weak router] in router?.lutron?.cancelOffTimers(for: $0) },
                                 cancelPlugTimers: { [weak router] in router?.kasa?.cancelOffTimers(for: $0) },
@@ -203,8 +219,7 @@ public final class Hub: @unchecked Sendable {
             } else {
                 let bridge = KasaBridge(config: kasa, log: log, status: { status(.kasa, $0) })
                 router.kasa = bridge
-                kasaBridge = bridge
-                tasks.append(Task { await bridge.connect() })
+                kasaBridge = bridge   // its monitor starts below, once the HomeKit outlets can receive its readings
             }
         } else {
             status(.kasa, .notConfigured)
@@ -241,15 +256,13 @@ public final class Hub: @unchecked Sendable {
         let homekit = self.homekit
         // Keep Home.app's outlets in step with the plugs: changes made through HouseBridge arrive at once, changes made
         // elsewhere (Kasa app, the plug's button) within a minute.
-        let outlets = config.homekitOutlets
-        if !outlets.isEmpty, let kasa = kasaBridge {
-            kasa.onChange = { name, on in relay.setOutlet(name, on) }
-            tasks.append(Task {
-                while !Task.isCancelled {
-                    for name in outlets { if let on = await kasa.isOn(name) { relay.setOutlet(name, on) } }
-                    try? await Task.sleep(for: .seconds(60))
-                }
-            })
+        if let kasa = kasaBridge {
+            let outlets = Set(config.homekitOutlets.map { $0.lowercased() })
+            if !outlets.isEmpty {
+                kasa.onChange = { name, on in relay.setOutlet(name, on) }
+                kasa.onState = { name, on in if outlets.contains(name.lowercased()) { relay.setOutlet(name, on) } }
+            }
+            tasks.append(Task { await kasa.monitor() })
         }
 
         if let unifi = config.unifi {
@@ -266,6 +279,18 @@ public final class Hub: @unchecked Sendable {
         } else {
             status(.unifi, .notConfigured)
         }
+    }
+
+    /// "Run now" for a scheduled rule (see `RuleEngine.runNow`).
+    public func runRuleNow(_ name: String) {
+        guard let engine else { return }
+        Task { await engine.runNow(name) }
+    }
+
+    /// Skips one occurrence of a scheduled rule, or takes the skip back (see `RuleEngine.skip`).
+    public func skipRule(_ name: String, at date: Date, undo: Bool = false) {
+        guard let engine else { return }
+        Task { if undo { await engine.unskip(name, at: date) } else { await engine.skip(name, at: date) } }
     }
 
     public func stop() {

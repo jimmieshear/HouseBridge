@@ -21,25 +21,45 @@ public final class KasaBridge: @unchecked Sendable {
                              uniquingKeysWith: { a, _ in a })
     }
 
-    /// Reads every plug once so the status shows whether they can be reached (and the log says which protocol each speaks).
-    public func connect() async {
+    /// Told (plug name, on/off) every time a plug is read successfully by `monitor`.
+    public var onState: (@Sendable (String, Bool) -> Void)?
+
+    /// Reads every plug about every minute (every 30 s while one is down), keeps the status in step with what it finds
+    /// (red when a plug can't be reached, green again when it can) and logs each outage and recovery once.
+    public func monitor() async {
         status(.connecting)
-        var reachable = 0
-        var problems: [String] = []
-        for plug in config.plugs {
-            do {
-                let (info, mode) = try await devices[plug.name.lowercased()]!.info()
-                reachable += 1
-                log(LogEntry(category: "kasa", message: "‘\(plug.name)’ at \(plug.host): \(info.model) \(info.isOn ? "on" : "off") via \(mode.rawValue)"))
-            } catch {
-                problems.append(plug.name)
-                log(LogEntry(level: .error, category: "kasa", message: "‘\(plug.name)’ at \(plug.host): \(describeError(error))\(config.accountNote(for: error))"))
+        var reachable: [String: Bool] = [:]
+        var last: ConnectionStatus?
+        while !Task.isCancelled {
+            var up = 0
+            var down: [String] = []
+            for plug in config.plugs {
+                let key = plug.name.lowercased()
+                do {
+                    let (info, mode) = try await devices[key]!.info()
+                    up += 1
+                    if reachable[key] != true {
+                        let back = reachable[key] == false
+                        log(LogEntry(category: "kasa", message: "‘\(plug.name)’ at \(plug.host): \(info.model) \(info.isOn ? "on" : "off") via \(mode.rawValue)\(back ? " (reachable again)" : "")"))
+                    }
+                    reachable[key] = true
+                    onState?(plug.name, info.isOn)
+                } catch {
+                    down.append(plug.name)
+                    if reachable[key] != false {
+                        log(LogEntry(level: .error, category: "kasa", message: "‘\(plug.name)’ at \(plug.host): \(describeError(error))\(config.accountNote(for: error))"))
+                    }
+                    reachable[key] = false
+                }
             }
+            let now: ConnectionStatus
+            if down.isEmpty { now = .connected("\(up) plug\(up == 1 ? "" : "s")") }
+            else if up == 0, config.password == nil, config.resolvedPassword() == nil, config.username != nil {
+                now = .needsSetup("no password: run housebridgectl set-kasa-password")
+            } else { now = .disconnected("can't reach " + down.joined(separator: ", ")) }
+            if now != last { status(now); last = now }
+            try? await Task.sleep(for: .seconds(down.isEmpty ? 60 : 30))
         }
-        if problems.isEmpty { status(.connected("\(reachable) plug\(reachable == 1 ? "" : "s")")) }
-        else if reachable == 0, config.password == nil, config.resolvedPassword() == nil, config.username != nil {
-            status(.needsSetup("no password: run housebridgectl set-kasa-password"))
-        } else { status(.disconnected("can't reach " + problems.joined(separator: ", "))) }
     }
 
     /// Turns a plug on or off. With `offAfter` (and `on`), schedules an off that any later call for the same plug replaces.

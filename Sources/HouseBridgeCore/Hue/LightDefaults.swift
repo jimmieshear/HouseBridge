@@ -138,7 +138,9 @@ public final class LightTemperatureVerifier: @unchecked Sendable {
     }
 
     public func run() async {
+        try? await Task.sleep(for: .seconds(10))   // let the Hue connection check and the first rules go first
         while !Task.isCancelled {
+            var pause = defaults.checkSeconds
             do {
                 let corrections = try await checkOnce()
                 if failing { failing = false; log(LogEntry(category: "hue", message: "light temperature check is working again")) }
@@ -146,8 +148,9 @@ public final class LightTemperatureVerifier: @unchecked Sendable {
             } catch {
                 if !failing { log(LogEntry(level: .warning, category: "hue", message: "light temperature check failed: \(describeError(error)); will keep trying")) }
                 failing = true
+                if case HueError.http(let failure) = error, failure.isRateLimited { pause = max(pause * 4, 120) }   // the bridge is busy: ease off
             }
-            try? await Task.sleep(for: .seconds(defaults.checkSeconds))
+            try? await Task.sleep(for: .seconds(pause))
         }
     }
 

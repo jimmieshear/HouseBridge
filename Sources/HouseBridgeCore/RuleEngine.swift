@@ -126,6 +126,12 @@ public actor RuleEngine {
     private var lightOffTimers: [String: (targets: PauseTargets, task: Task<Void, Never>, switchName: String?, off: Action)] = [:]
     private let onSwitch: @Sendable (String, Bool) -> Void
     private let holdStore: HoldStore?
+    /// Per device key: when a person last ran a rule on it from the window. Schedule times before that no longer apply.
+    private let overrideStore: HoldStore?
+    private var manualAt: [String: Date] = [:]
+    /// Occurrences to skip once, by `Upcoming.skipKey`; the value is the occurrence time (to forget old ones).
+    private let skipStore: HoldStore?
+    private var skips: [String: Date] = [:]
     private let cancelLutronTimers: @Sendable ([String]) -> Void
     private let cancelPlugTimers: @Sendable ([String]) -> Void
     private let now: @Sendable () -> Date
@@ -140,6 +146,8 @@ public actor RuleEngine {
     public init(config: Config, executor: ActionExecutor,
                 onEvent: @escaping @Sendable (TriggerEvent) -> Void = { _ in },
                 holdStore: HoldStore? = nil,
+                overrideStore: HoldStore? = nil,
+                skipStore: HoldStore? = nil,
                 onSwitch: @escaping @Sendable (String, Bool) -> Void = { _, _ in },
                 cancelLutronTimers: @escaping @Sendable ([String]) -> Void = { _ in },
                 cancelPlugTimers: @escaping @Sendable ([String]) -> Void = { _ in },
@@ -154,6 +162,8 @@ public actor RuleEngine {
         self.log = log
         self.onEvent = onEvent
         self.holdStore = holdStore
+        self.overrideStore = overrideStore
+        self.skipStore = skipStore
         self.onSwitch = onSwitch
         self.cancelLutronTimers = cancelLutronTimers
         self.cancelPlugTimers = cancelPlugTimers
@@ -171,6 +181,14 @@ public actor RuleEngine {
     public func start() {
         guard runner == nil else { return }
         restoreHolds()
+        if let overrideStore {
+            let cutoff = now().addingTimeInterval(-7 * 86400)   // older than any schedule could still matter
+            manualAt = overrideStore.load().filter { $0.value > cutoff }
+        }
+        if let skipStore {
+            skips = skipStore.load().filter { $0.value > now().addingTimeInterval(-3600) }
+            skipStore.save(skips)
+        }
         if let delay = catchUpOnStart {
             // Gives Hue/Kasa a moment to connect; a failure is retried anyway.
             Task { [weak self] in
@@ -375,6 +393,7 @@ public actor RuleEngine {
                   rule.between?.contains(at, location: config.location) ?? true else { continue }
             for action in rule.actions {
                 for key in action.targets.keys where held.contains(key) {
+                    if let manual = manualAt[key], manual >= at { continue }
                     if let existing = latest[key], existing.at > at { continue }
                     latest[key] = Candidate(at: at, rule: rule.name, action: action)
                 }
@@ -449,6 +468,13 @@ public actor RuleEngine {
     }
 
     private func fire(_ rule: Rule, for event: TriggerEvent) {
+        if event.source == .clock, let schedule = rule.trigger.schedule,
+           let due = schedule.previous(onOrBefore: event.date, location: config.location),
+           skips.removeValue(forKey: Upcoming.skipKey(rule.name, due)) != nil {
+            skipStore?.save(skips)
+            log(LogEntry(category: "rules", message: "‘\(rule.name)’ skipped as requested (was due \(RuleEngine.format(due)))"))
+            return
+        }
         if let (hold, until) = activeHold(pausing: rule) {
             log(LogEntry(category: "rules", message: "‘\(rule.name)’ skipped: paused by ‘\(hold.name)’ until \(RuleEngine.format(until))"))
             return
@@ -468,7 +494,7 @@ public actor RuleEngine {
     }
 
     /// Settles the auto-off timers, then runs the actions in the background.
-    private func run(_ rule: Rule, holdKey: String) {
+    private func run(_ rule: Rule, holdKey: String, manual: Bool = false) {
         let executor = self.executor
         let log = self.log
         let actions = rule.actions
@@ -491,11 +517,63 @@ public actor RuleEngine {
                 } catch {
                     log(LogEntry(level: .error, category: "rules", message: "‘\(name)’ action failed: \(error)"))
                     // A scheduled change that did not happen is tried again, not forgotten until the next occurrence.
-                    if isScheduled { await self?.scheduleRetry(Set(action.targets.keys), attempt: 0) }
+                    // A manual run is not retried (the person is watching); its override is withdrawn so the schedule still applies.
+                    if manual { await self?.withdrawOverride(action.targets.keys) }
+                    else if isScheduled { await self?.scheduleRetry(Set(action.targets.keys), attempt: 0) }
                 }
             }
         }
         _ = task
+    }
+
+    // MARK: Run now (manual override)
+
+    /// "Run now" from the window: runs a rule's actions immediately, ignoring its trigger, time window, cooldown and
+    /// presence holds (a person asked). The devices it touched are marked as set by hand at this moment, so catch-up
+    /// (startup, wake, retries) and the end of a presence hold do not undo it with an older schedule time; the next
+    /// scheduled change for those devices takes over as usual. The marks survive a restart.
+    public func runNow(_ ruleName: String) {
+        guard let rule = config.rules.first(where: { $0.name == ruleName && $0.enabled }) else {
+            log(LogEntry(level: .warning, category: "rules", message: "run now: no enabled rule named ‘\(ruleName)’"))
+            return
+        }
+        let keys = Set(rule.actions.flatMap { $0.targets.keys })
+        let stamp = now()
+        for key in keys { manualAt[key] = stamp }
+        overrideStore?.save(manualAt)
+        log(LogEntry(category: "rules", message: "‘\(rule.name)’ run now by hand; stays until the next scheduled change for \(keys.sorted().joined(separator: ", "))"))
+        run(rule, holdKey: "manual:\(rule.name)", manual: true)
+    }
+
+    /// "Skip" from the window: this one occurrence of a scheduled rule does not run. Its devices are also marked as
+    /// settled up to that time, so catch-up (wake, restart) does not apply the skipped change late. Later occurrences
+    /// are unaffected. Survives a restart.
+    public func skip(_ ruleName: String, at date: Date) {
+        guard let rule = config.rules.first(where: { $0.name == ruleName && $0.enabled && $0.trigger.schedule != nil }) else {
+            log(LogEntry(level: .warning, category: "rules", message: "skip: no enabled scheduled rule named ‘\(ruleName)’"))
+            return
+        }
+        skips[Upcoming.skipKey(ruleName, date)] = date
+        skipStore?.save(skips)
+        for key in Set(rule.actions.flatMap { $0.targets.keys }) { manualAt[key] = max(manualAt[key] ?? .distantPast, date) }
+        overrideStore?.save(manualAt)
+        log(LogEntry(category: "rules", message: "‘\(ruleName)’ will be skipped once, at \(RuleEngine.format(date))"))
+    }
+
+    /// Takes a skip back, as long as that time has not passed.
+    public func unskip(_ ruleName: String, at date: Date) {
+        guard skips.removeValue(forKey: Upcoming.skipKey(ruleName, date)) != nil else { return }
+        skipStore?.save(skips)
+        if let rule = config.rules.first(where: { $0.name == ruleName }) {
+            for key in Set(rule.actions.flatMap { $0.targets.keys }) where manualAt[key] == date { manualAt.removeValue(forKey: key) }
+            overrideStore?.save(manualAt)
+        }
+        log(LogEntry(category: "rules", message: "‘\(ruleName)’ at \(RuleEngine.format(date)) will run after all"))
+    }
+
+    private func withdrawOverride(_ keys: some Collection<String>) {
+        for key in keys { manualAt.removeValue(forKey: key) }
+        overrideStore?.save(manualAt)
     }
 
     // MARK: Catch-up of scheduled state
@@ -523,6 +601,7 @@ public actor RuleEngine {
                 default: steady = false
                 }
                 for key in action.targets.keys where only?.contains(key) ?? true {
+                    if let manual = manualAt[key], manual >= at { continue }   // set by hand since: the person's choice stands
                     if let existing = latest[key], existing.at > at { continue }
                     latest[key] = Candidate(at: at, rule: rule.name, action: action, steady: steady)
                 }

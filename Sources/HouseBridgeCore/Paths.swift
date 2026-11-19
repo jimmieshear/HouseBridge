@@ -10,6 +10,10 @@ public struct Paths: Sendable {
     public var homeKitLockFile: URL { home.appendingPathComponent("homekit.lock") }
     public var matterFile: URL { home.appendingPathComponent("matter.json") }
     public var holdsFile: URL { home.appendingPathComponent("holds.json") }
+    /// When each device was last set by hand from the window ("Run now"); see `RuleEngine.runNow`.
+    /// Occurrences of scheduled rules the person asked to skip once ("Skip" in the window).
+    public var skipsFile: URL { home.appendingPathComponent("skips.json") }
+    public var overridesFile: URL { home.appendingPathComponent("overrides.json") }
     public var knownHostsFile: URL { home.appendingPathComponent("known_hosts.json") }
 
     public init(home: URL) { self.home = home }

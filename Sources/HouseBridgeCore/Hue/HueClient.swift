@@ -57,6 +57,9 @@ public final class HueClient: @unchecked Sendable {
     private let hosts: KnownHosts
     private let lock = NSLock()
     private var cache: HueInventory?
+    private var inflight: Task<HueInventory, Error>?
+    /// The bridge is a small device: never more than a couple of requests at once (it answers 429 otherwise).
+    private let gate = RequestGate(limit: 2)
 
     public init(credentials: HueCredentials, hosts: KnownHosts) {
         self.credentials = credentials
@@ -111,20 +114,36 @@ public final class HueClient: @unchecked Sendable {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let data: Data, response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
-        catch let error as URLError where error.code == .cancelled && hosts.takeMismatch(host: credentials.host) {
-            throw HueError.certificateChanged(host: credentials.host)
+        // 429 / 503 mean "too busy right now": wait (as long as the bridge asks, else 1 s, 2 s, 4 s) and try again.
+        let final = request
+        for attempt in 0..<4 {
+            let data: Data, response: URLResponse
+            do { (data, response) = try await gate.run { try await session.data(for: final) } }
+            catch let error as URLError where error.code == .cancelled && hosts.takeMismatch(host: credentials.host) {
+                throw HueError.certificateChanged(host: credentials.host)
+            }
+            let http = response as? HTTPURLResponse
+            let status = http?.statusCode ?? 0
+            if (status == 429 || status == 503), attempt < 3 {
+                let asked = http?.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
+                try await Task.sleep(for: .seconds(min(asked ?? Double(1 << attempt), 10)))
+                continue
+            }
+            guard (200..<300).contains(status) else {
+                throw HueError.http(HTTPFailure(status: status, body: String(decoding: data, as: UTF8.self)))
+            }
+            let object = try parseJSON(data) as? JSON
+            return object?["data"] as? [JSON] ?? []
         }
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(status) else {
-            throw HueError.http(HTTPFailure(status: status, body: String(decoding: data, as: UTF8.self)))
-        }
-        let object = try parseJSON(data) as? JSON
-        return object?["data"] as? [JSON] ?? []
+        throw HueError.http(HTTPFailure(status: 429, body: "Too Many Requests"))   // not reached; the last attempt throws above
     }
 
     // MARK: State
+
+    /// One small request, to learn whether the bridge answers (and still accepts our key).
+    public func ping() async throws {
+        _ = try await request("GET", "/resource/bridge")
+    }
 
     /// Every light that can show a white temperature, with whether it is on and what it is showing.
     public func lightStates() async throws -> [HueLightState] {
@@ -153,9 +172,23 @@ public final class HueClient: @unchecked Sendable {
 
     // MARK: Inventory
 
+    /// Callers that ask while a fetch is already running share it, so startup does not send the same five requests twice.
     public func inventory(refresh: Bool = false) async throws -> HueInventory {
-        let cached = lock.withLock { cache }
-        if let cached, !refresh { return cached }
+        let task: Task<HueInventory, Error>
+        switch lock.withLock({ () -> (HueInventory?, Task<HueInventory, Error>?) in (refresh ? nil : cache, inflight) }) {
+        case (let cached?, _): return cached
+        case (_, let running?): return try await running.value
+        default:
+            task = Task { [self] in
+                defer { lock.withLock { inflight = nil } }
+                return try await loadInventory()
+            }
+            lock.withLock { inflight = task }
+        }
+        return try await task.value
+    }
+
+    private func loadInventory() async throws -> HueInventory {
 
         func named(_ items: [JSON]) -> [String: String] {
             var out: [String: String] = [:]
@@ -247,5 +280,24 @@ public final class HueClient: @unchecked Sendable {
         }
         lock.withLock { cache = inv }
         return inv
+    }
+}
+
+/// Lets at most `limit` operations run at once; the rest wait their turn.
+actor RequestGate {
+    private let limit: Int
+    private var running = 0
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    init(limit: Int) { self.limit = limit }
+
+    func run<T: Sendable>(_ body: @Sendable () async throws -> T) async rethrows -> T {
+        if running >= limit { await withCheckedContinuation { waiting.append($0) } }
+        else { running += 1 }
+        defer { release() }
+        return try await body()
+    }
+
+    private func release() {
+        if waiting.isEmpty { running -= 1 } else { waiting.removeFirst().resume() }   // hand the slot straight to the next waiter
     }
 }
