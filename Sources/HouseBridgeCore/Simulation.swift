@@ -18,6 +18,8 @@ public struct Simulation: Sendable {
     public var minutes: ClosedRange<Double>
     /// One is picked per session. Each is a `light` action; `on` and `off_after_seconds` are filled in.
     public var choices: [(target: HueTarget, state: LightState)]
+    /// Per choice (same index), lights that come on and go off together with it (`also:`), e.g. the hallway.
+    public var companions: [[(target: HueTarget, state: LightState)]] = []
 
     func chance(forNightStarting day: Date, calendar: Calendar) -> Double {
         weekendDays.contains(calendar.component(.weekday, from: day)) ? weekendChance : weekdayChance
@@ -94,13 +96,21 @@ extension Simulation {
         return out.sorted { $0.start < $1.start }
     }
 
-    /// The `light` action for one session, `remaining` seconds long.
-    func action(for session: SimulatedSession, remaining: TimeInterval) -> Action {
-        let (target, base) = choices[session.choice]
-        var state = base
-        state.on = true
-        state.offAfterSeconds = max(1, remaining.rounded())
-        return .light(target, state)
+    /// Rooms/lights/zones a session lights, the chosen one first, e.g. "Bedroom 1, Hallway 1".
+    public func targetNames(_ session: SimulatedSession) -> String {
+        let all = [choices[session.choice]] + (session.choice < companions.count ? companions[session.choice] : [])
+        return all.flatMap { $0.target.rooms + $0.target.lights + $0.target.zones }.joined(separator: ", ")
+    }
+
+    /// The `light` actions for one session, `remaining` seconds long: the chosen light, then its companions.
+    func actions(for session: SimulatedSession, remaining: TimeInterval) -> [Action] {
+        let all = [choices[session.choice]] + (session.choice < companions.count ? companions[session.choice] : [])
+        return all.map { target, base in
+            var state = base
+            state.on = true
+            state.offAfterSeconds = max(1, remaining.rounded())
+            return .light(target, state)
+        }
     }
 }
 
@@ -152,21 +162,38 @@ extension ConfigLoader {
         guard case .array(let rawLights)? = r.map["lights"], !rawLights.isEmpty else {
             throw ConfigError(path: r.path + ".lights", message: "needs a non-empty list, e.g. - { room: Bedroom 1 }")
         }
-        var choices: [(HueTarget, LightState)] = []
-        for (i, raw) in rawLights.enumerated() {
-            guard case .map(let m) = raw else { throw ConfigError(path: "\(r.path).lights[\(i)]", message: "must be a map") }
+        /// One light entry, as in a rule's `light` action; `on` and `off_after_seconds` are set by the simulation.
+        func lightEntry(_ raw: YAMLValue, path: String, allowed: [String] = []) throws -> (HueTarget, LightState) {
+            guard case .map(let m) = raw else { throw ConfigError(path: path, message: "must be a map") }
             var withAction = m
+            for key in allowed { withAction[key] = nil }
             withAction["action"] = .string("light")
             withAction["on"] = .bool(true)
             for key in ["on", "off_after_seconds"] where m[key] != nil {
-                throw ConfigError(path: "\(r.path).lights[\(i)].\(key)", message: "is set by the simulation")
+                throw ConfigError(path: "\(path).\(key)", message: "is set by the simulation")
             }
-            guard case .light(let target, let state) = try parseAction(Reader(map: withAction, path: "\(r.path).lights[\(i)]")) else { continue }
-            choices.append((target, state))
+            guard case .light(let target, let state) = try parseAction(Reader(map: withAction, path: path)) else {
+                throw ConfigError(path: path, message: "needs room:, zone: or light:")
+            }
+            return (target, state)
+        }
+        var choices: [(HueTarget, LightState)] = []
+        var companions: [[(HueTarget, LightState)]] = []
+        for (i, raw) in rawLights.enumerated() {
+            let path = "\(r.path).lights[\(i)]"
+            choices.append(try lightEntry(raw, path: path, allowed: ["also"]))
+            var extra: [(HueTarget, LightState)] = []
+            if case .map(let m) = raw, let also = m["also"] {
+                switch also {
+                case .array(let items): for (j, item) in items.enumerated() { extra.append(try lightEntry(item, path: "\(path).also[\(j)]")) }
+                default: extra.append(try lightEntry(also, path: path + ".also"))
+                }
+            }
+            companions.append(extra)
         }
 
         return Simulation(name: try r.requireString("name"), enabled: try r.bool("enabled") ?? true,
                           between: TimeWindow(start: s, end: e), weekdayChance: weekday / 100, weekendChance: weekend / 100,
-                          weekendDays: weekendDays, sessions: sessions, minutes: minutes, choices: choices)
+                          weekendDays: weekendDays, sessions: sessions, minutes: minutes, choices: choices, companions: companions)
     }
 }

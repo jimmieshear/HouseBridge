@@ -11,6 +11,7 @@ public enum HueError: Error, CustomStringConvertible {
     case notFound(kind: String, name: String, available: [String])
     case http(HTTPFailure)
     case certificateChanged(host: String)
+    case invalid(String)
 
     public var description: String {
         switch self {
@@ -18,6 +19,7 @@ public enum HueError: Error, CustomStringConvertible {
         case .linkButtonNotPressed: return "Press the round link button on the Hue bridge, then try again."
         case .notFound(let kind, let name, let available):
             return "No Hue \(kind) named “\(name)”. Available: \(available.sorted().joined(separator: ", "))"
+        case .invalid(let message): return message
         case .http(let f): return "Hue bridge error: \(f)"
         case .certificateChanged(let host):
             return "The Hue bridge at \(host) presented a different certificate than the one pinned on first use (a bridge firmware update or reset does this). If you trust it, run: housebridgectl forget-host \(host)"
@@ -34,6 +36,7 @@ public struct HueInventory: Sendable {
         public var details: [String] = []
         public var product: String = ""
         public var supportsColor = false
+        public var supportsTemperature = false
         /// For rooms and zones: ids of the lights inside.
         public var lightIds: [String] = []
     }
@@ -243,6 +246,7 @@ public final class HueClient: @unchecked Sendable {
             var item = HueInventory.Item(id: id, name: n, groupedLightId: nil)
             item.details = capabilities(l)
             item.supportsColor = l["color"] != nil
+            item.supportsTemperature = l["color_temperature"] != nil
             item.product = ((l["owner"] as? JSON)?["rid"] as? String).flatMap { products[$0] } ?? ""
             return item
         }

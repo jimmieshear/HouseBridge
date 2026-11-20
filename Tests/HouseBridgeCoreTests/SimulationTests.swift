@@ -103,4 +103,31 @@ final class SimulationTests: XCTestCase {
         XCTAssertEqual(exec.actions.count, 1)
         await engine.stop()
     }
+
+    func testAlsoRunsCompanionLightsTogetherAndStaysPausedByTheBedroom() async throws {
+        let withAlso = yaml.replacingOccurrences(of: "- { room: Bedroom 1, brightness: 40 }",
+                                                 with: "- { room: Bedroom 1, brightness: 40, also: { room: Hallway 1, brightness: 20 } }")
+        let cfg = try ConfigLoader.parse(withAlso)
+        let sim = cfg.simulations[0]
+        XCTAssertEqual(sim.choices.count, 2); XCTAssertEqual(sim.companions[0].count, 1); XCTAssertEqual(sim.companions[1].count, 0)
+        let session = SimulatedSession(start: Date(timeIntervalSince1970: 1_800_000_000), seconds: 1800, choice: 0)
+        let exec = RecordingExecutor()
+        let engine = RuleEngine(config: cfg, executor: exec, now: { session.start.addingTimeInterval(60) }, log: { _ in })
+        await engine.start()
+        await engine.fireSimulated(sim, session)
+        try await Task.sleep(for: .milliseconds(50))
+        var rooms: [String] = [], brightness: [Double?] = [], offs: [Double?] = []
+        for action in exec.actions {
+            guard case .light(let t, let st) = action else { continue }
+            rooms.append(t.rooms[0]); brightness.append(st.brightness); offs.append(st.offAfterSeconds)
+        }
+        XCTAssertEqual(rooms, ["Bedroom 1", "Hallway 1"])
+        XCTAssertEqual(brightness, [40, 20]); XCTAssertEqual(offs, [1740, 1740])
+        // Someone home pauses the bedroom, so the hallway companion is skipped with it.
+        await engine.handle(TriggerEvent(source: .unifi, device: "Front Door Motion", input: "motion", kind: "start"))
+        await engine.fireSimulated(sim, session)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(exec.actions.count, 2)
+        await engine.stop()
+    }
 }

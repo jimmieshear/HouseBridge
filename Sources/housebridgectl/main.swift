@@ -23,6 +23,8 @@ func usage() -> Never {
       set-kasa-password    Store the Kasa/TP-Link account password in the macOS Keychain (--delete removes it)
       forget-host [<ip>]   Forget the pinned TLS certificate of a Hue/UniFi host (after a firmware update or reset); no argument lists pinned hosts
       pair-hue             Pair with the Hue bridge (press its link button first)
+      create-scene <name> --room <room|zone> --kelvin <K> [--brightness 1-100] [--replace]
+                           Save a scene on the Hue bridge with an exact white temperature (default brightness 100)
       pair-lutron [<ip>] [--out <dir>]  Pair with a Lutron Smart Bridge (Pro/RA2 Select) and write ca.pem, cert.pem, key.pem (default: <config home>/lutron)
       import-homebridge    Read a running Homebridge's config (found over Bonjour and its web UI, or --from-file) and add it to your HouseBridge config
                            (appends the missing unifi:/homekit: sections to an existing config, never overwrites; creates one if absent)
@@ -200,8 +202,7 @@ case "schedule":
         let sessions = sim.upcoming(after: Date(), location: config.location, days: 7)
         if sessions.isEmpty { print("  (no sessions planned)") }
         for s in sessions {
-            let target = sim.choices[s.choice].target
-            print("  • \(f.string(from: s.start))–\(tf.string(from: s.end)): \((target.rooms + target.lights + target.zones).joined(separator: ", "))")
+            print("  • \(f.string(from: s.start))–\(tf.string(from: s.end)): \(sim.targetNames(s))")
         }
     }
 
@@ -424,6 +425,24 @@ case "pair-hue":
         }
     }
     fail("Timed out waiting for the link button.")
+
+case "create-scene":
+    let room = takeOption("--room"), kelvin = takeOption("--kelvin").flatMap { Int($0) }
+    let brightness = takeOption("--brightness").flatMap { Double($0) } ?? 100
+    let replace = takeFlag("--replace")
+    guard let name = args.dropFirst().first, let room, let kelvin else {
+        fail("Usage: housebridgectl create-scene <name> --room <room|zone> --kelvin <K> [--brightness 1-100] [--replace]")
+    }
+    let config = loadConfig()
+    guard let h = config.hue, let creds = HueClient.load(from: paths.hueFile), creds.host == h.host else {
+        fail("Hue is not paired yet. Run: housebridgectl pair-hue")
+    }
+    do {
+        let r = try await HueClient(credentials: creds, hosts: KnownHosts(url: paths.knownHostsFile))
+            .createScene(name: name, group: room, kelvin: kelvin, brightness: brightness, replace: replace)
+        fileLog.write(category: "hue", message: "\(r.updated ? "updated" : "created") scene “\(name)” in “\(room)” (\(kelvin) K, \(r.lights) lights)")
+        print("\(r.updated ? "Updated" : "Created") scene “\(name)” in “\(room)”: \(kelvin) K at \(Int(brightness))% on \(r.lights) light(s). It now appears in the Hue app.")
+    } catch { fail("create-scene failed: \(describeError(error))") }
 
 case "camera-test":
     let config = loadConfig()

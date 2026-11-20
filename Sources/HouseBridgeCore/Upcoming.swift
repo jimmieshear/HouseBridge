@@ -46,8 +46,7 @@ public enum Upcoming {
         }
         for simulation in config.simulations where simulation.enabled {
             for session in simulation.upcoming(after: now, location: config.location, calendar: calendar, days: simulationDays) where session.start > now {
-                let target = simulation.choices[session.choice].target
-                let where_ = (target.rooms + target.lights + target.zones).joined(separator: ", ")
+                let where_ = simulation.targetNames(session)
                 out.append(UpcomingEvent(date: session.start, title: "Looks lived in: \(where_)",
                                          detail: "\(clock.string(from: session.start))–\(clock.string(from: session.end))"))
             }

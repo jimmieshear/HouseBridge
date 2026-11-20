@@ -743,7 +743,7 @@ public actor RuleEngine {
     func fireSimulated(_ sim: Simulation, _ session: SimulatedSession) {
         let remaining = session.end.timeIntervalSince(now())
         guard remaining > 1 else { return }
-        let rule = Rule(name: sim.name, trigger: TriggerSpec(source: .clock, kind: "simulate"), actions: [sim.action(for: session, remaining: remaining)])
+        let rule = Rule(name: sim.name, trigger: TriggerSpec(source: .clock, kind: "simulate"), actions: sim.actions(for: session, remaining: remaining))
         if let (hold, until) = activeHold(pausing: rule) {
             log(LogEntry(category: "simulate", message: "‘\(sim.name)’ skipped: paused by ‘\(hold.name)’ until \(RuleEngine.format(until))"))
             return
