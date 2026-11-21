@@ -31,6 +31,20 @@ unifi:
 #   # port: 51826                         # optional; default lets the system choose
 #   # smart_detections: true              # also a motion sensor each for person, vehicle, animal, ...
 
+# Smoke / CO alarms and temperature / humidity from HomeKit accessories (e.g. an Owl smoke detector that is only in
+# Home.app). HomeKit cannot be read from here directly, so HouseBridge starts a hidden helper that is built into the
+# app (see README, "HomeKit sensors"). Names are as shown in Home.app; "*" means every sensor the helper reports.
+# home_sensors:
+#   devices: [Owl upstairs Master]       # HomeKit accessories (needs the helper)
+#   unifi: [USL Environmental]           # UniFi Protect sensors, read directly from the console
+
+# A button in Home.app that runs these actions when pressed (it springs back a second later; Siri and Home automations
+# can press it too). Needs the homekit: section above. Example: put a room at the default white, at full brightness.
+# buttons:
+#   - name: Default Lights
+#     then:
+#       - { action: scene, name: Bright, room: Family Room, brightness: 100 }
+
 timing:
   double_tap_ms: 300
   hold_ms: 500

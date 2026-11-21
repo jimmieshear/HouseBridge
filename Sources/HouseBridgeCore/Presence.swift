@@ -52,8 +52,9 @@ extension Action {
 
 extension Rule {
     /// Holds only pause automation. A Pico press is a person at the switch, so it always works, as does a rule marked `ignore_presence`.
+    /// A smoke or CO alarm is never paused: someone being home is exactly when it matters.
     func isPaused(by hold: PresenceHold) -> Bool {
-        guard trigger.source != .pico, !ignorePresence else { return false }
+        guard trigger.source != .pico, trigger.source != .homekit, !ignorePresence else { return false }
         return actions.contains { hold.pauses.covers($0.targets) }
     }
 }

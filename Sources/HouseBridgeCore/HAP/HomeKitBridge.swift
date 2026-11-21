@@ -258,6 +258,7 @@ public final class HomeKitBridge: @unchecked Sendable {
         switchKeys = built.switches
         outletKeys = built.outlets
         for (name, on) in outletState { if let key = outletKeys[name] { server.setValue(key, .bool(on)) } }
+        applyMeasurements()
         cameraIDs = built.cameras
         setupEndpointKeys = Set(built.setupEndpoints.keys)
         selectedStreamKeys = Set(built.selectedStreams.keys)
@@ -285,10 +286,37 @@ public final class HomeKitBridge: @unchecked Sendable {
 
     private func applyInventory(_ items: [ProtectInventory.Item]) {
         channels = Dictionary(uniqueKeysWithValues: items.filter { $0.kind == "camera" }.map { ($0.id, $0.channels) })
-        let devices = items.map { HAPDevice(id: $0.id, name: $0.name, model: $0.model, kind: $0.kind, provides: $0.provides) }
+        // A sensor that reports temperature or humidity gets those services too.
+        let devices = items.map { item in
+            HAPDevice(id: item.id, name: item.name, model: item.model, kind: item.kind,
+                      provides: item.provides + item.measurements.keys.filter { $0 == "temperature" || $0 == "humidity" }.sorted())
+        }
+        for item in items { for (kind, value) in item.measurements { measurementState["\(item.id)|\(kind)"] = value } }
         if devices != store?.state.devices { applyDevices(devices) }
         for item in items {
             for (input, on) in item.state { set(deviceID: item.id, input: input, on: on) }
+        }
+        applyMeasurements()
+    }
+
+    // MARK: Temperature and humidity
+
+    /// Latest reading per `"<protect device id>|<temperature|humidity>"`, kept so a rebuilt layout starts with real values.
+    private var measurementState: [String: Double] = [:]
+
+    private func applyMeasurements() {
+        for (key, value) in measurementState { if let route = routes[key] { server?.setValue(route.key, .double(value)) } }
+    }
+
+    /// New environmental readings read straight from Protect (`SensorReading.isProtect`); anything else is ignored.
+    public func updateReadings(_ readings: [SensorReading]) {
+        queue.async {
+            guard self.running else { return }
+            for r in readings where r.isProtect && (r.kind == "temperature" || r.kind == "humidity") {
+                let key = "\(r.accessory.dropFirst("unifi:".count))|\(r.kind)"
+                self.measurementState[key] = r.value
+                if let route = self.routes[key] { self.server?.setValue(route.key, .double(r.value)) }
+            }
         }
     }
 
@@ -378,7 +406,7 @@ public final class HomeKitBridge: @unchecked Sendable {
         switch route.kind {
         case .motion: server?.setValue(route.key, .bool(on))
         case .contact, .leak: server?.setValue(route.key, .int(on ? 1 : 0))   // contact: 1 = open, leak: 1 = detected
-        case .button: break
+        case .button, .temperature, .humidity: break
         }
     }
 }

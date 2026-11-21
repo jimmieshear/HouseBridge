@@ -10,6 +10,8 @@ public struct LightDefaults: Sendable {
         public var kelvin: Int?
         /// Never touch these lights.
         public var ignore: Bool
+        /// Also put these lights back to white when they are showing a color (normally a light showing a color is left alone).
+        public var resetColor: Bool = false
     }
     public var kelvin: Int
     /// How often the bridge is read.
@@ -45,14 +47,16 @@ public struct LightDefaults: Sendable {
                 let path = "\(r.path).overrides[\(i)]"
                 guard case .map(let m) = item else { throw ConfigError(path: path, message: "must be a map") }
                 let o = Reader(map: m, path: path)
-                try o.rejectUnknown(["light", "room", "zone", "kelvin", "ignore"])
+                try o.rejectUnknown(["light", "room", "zone", "kelvin", "ignore", "reset_color"])
                 let targets: [Override.Target] = [try o.string("light").map { .light($0) }, try o.string("room").map { .room($0) },
                                                   try o.string("zone").map { .zone($0) }].compactMap { $0 }
                 guard targets.count == 1 else { throw ConfigError(path: path, message: "needs exactly one of light:, room: or zone:") }
                 let ignore = try o.bool("ignore") ?? false
                 let k = try kelvin(o, required: false)
                 guard ignore != (k != nil) else { throw ConfigError(path: path, message: "needs either kelvin: or ignore: true") }
-                out.overrides.append(Override(target: targets[0], kelvin: k, ignore: ignore))
+                let resetColor = try o.bool("reset_color") ?? false
+                guard !(ignore && resetColor) else { throw ConfigError(path: path + ".reset_color", message: "makes no sense together with ignore: true") }
+                out.overrides.append(Override(target: targets[0], kelvin: k, ignore: ignore, resetColor: resetColor))
             }
         }
         return out
@@ -68,6 +72,8 @@ public struct HueLightState: Sendable {
     public var mirek: Int?
     public var minMirek: Int
     public var maxMirek: Int
+    /// 0–100, when the bridge reports one.
+    public var brightness: Double? = nil
 }
 
 public struct TemperatureCorrection: Sendable {
@@ -76,13 +82,17 @@ public struct TemperatureCorrection: Sendable {
     public var fromKelvin: Int
     public var toKelvin: Int
     public var toMirek: Int
+    public var brightness: Double? = nil
+    public var room: String? = nil
+    /// The light was showing a color, not a white (`fromKelvin` is 0).
+    public var fromColor = false
 }
 
 enum LightTemperature {
     static func kelvin(mirek: Int) -> Int { Int((1_000_000 / Double(max(mirek, 1))).rounded()) }
 
-    /// The kelvin a light should have, or nil when it is to be left alone.
-    static func wanted(_ light: HueInventory.Item, inventory: HueInventory, defaults: LightDefaults) -> Int? {
+    /// The most specific override that applies to a light: its own, then a zone's, then a room's.
+    static func override(for light: HueInventory.Item, inventory: HueInventory, defaults: LightDefaults) -> LightDefaults.Override? {
         func matches(_ a: String, _ b: String) -> Bool { a.lowercased() == b.lowercased() }
         let zones = Set(inventory.zones.filter { $0.lightIds.contains(light.id) }.map { $0.name.lowercased() })
         let rooms = Set(inventory.rooms.filter { $0.lightIds.contains(light.id) }.map { $0.name.lowercased() })
@@ -95,10 +105,16 @@ enum LightTemperature {
                 case (2, .room(let n)): hit = rooms.contains(n.lowercased())
                 default: hit = false
                 }
-                if hit { return o.ignore ? nil : o.kelvin }
+                if hit { return o }
             }
         }
-        return defaults.kelvin
+        return nil
+    }
+
+    /// The kelvin a light should have, or nil when it is to be left alone.
+    static func wanted(_ light: HueInventory.Item, inventory: HueInventory, defaults: LightDefaults) -> Int? {
+        guard let o = override(for: light, inventory: inventory, defaults: defaults) else { return defaults.kelvin }
+        return o.ignore ? nil : o.kelvin
     }
 
     /// Lights that are on, in white (not a color), outside any active scene, and further from their wanted temperature than
@@ -109,12 +125,22 @@ enum LightTemperature {
         let byID = Dictionary(inventory.lights.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var out: [TemperatureCorrection] = []
         for state in states where state.on {
-            guard let current = state.mirek, !sceneLights.contains(state.id), let light = byID[state.id],
+            guard !sceneLights.contains(state.id), let light = byID[state.id],
                   let wanted = wanted(light, inventory: inventory, defaults: defaults) else { continue }
             let target = min(state.maxMirek, max(state.minMirek, Int((1_000_000 / Double(wanted)).rounded())))
+            let room = inventory.rooms.first { $0.lightIds.contains(state.id) }?.name
+            guard let current = state.mirek else {
+                // Showing a color rather than a white: left alone, unless its override says to reset it.
+                if override(for: light, inventory: inventory, defaults: defaults)?.resetColor == true {
+                    out.append(TemperatureCorrection(lightID: state.id, name: state.name, fromKelvin: 0, toKelvin: kelvin(mirek: target),
+                                                     toMirek: target, brightness: state.brightness, room: room, fromColor: true))
+                }
+                continue
+            }
             let from = kelvin(mirek: current), to = kelvin(mirek: target)
             if abs(from - to) > defaults.toleranceKelvin {
-                out.append(TemperatureCorrection(lightID: state.id, name: state.name, fromKelvin: from, toKelvin: to, toMirek: target))
+                out.append(TemperatureCorrection(lightID: state.id, name: state.name, fromKelvin: from, toKelvin: to, toMirek: target,
+                                                 brightness: state.brightness, room: room))
             }
         }
         return out
@@ -172,7 +198,10 @@ public final class LightTemperatureVerifier: @unchecked Sendable {
         for c in corrections {
             lastSent[c.lightID] = now
             try await client.setColorTemperature(lightID: c.lightID, mirek: c.toMirek)
-            log(LogEntry(category: "hue", message: "light ‘\(c.name)’: \(c.fromKelvin) K → \(c.toKelvin) K (default)"))
+            // Where and how bright it was says what moved it: a whole room at one odd value and one brightness points at
+            // something recalling a setting (a Home.app or Hue routine), not at drift.
+            let context = [c.room, c.brightness.map { "\(Int($0.rounded()))%" }].compactMap { $0 }.joined(separator: ", ")
+            log(LogEntry(category: "hue", message: "light ‘\(c.name)’\(context.isEmpty ? "" : " (\(context))"): \(c.fromColor ? "was showing a color" : "\(c.fromKelvin) K") → \(c.toKelvin) K (default; no Hue scene active there)"))
         }
         return corrections
     }

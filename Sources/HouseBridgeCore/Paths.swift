@@ -4,6 +4,8 @@ public struct Paths: Sendable {
     public let home: URL
 
     public var configFile: URL { home.appendingPathComponent("config.yaml") }
+    /// Unix socket HouseBridge listens on for the HouseBridgeHomeKit helper.
+    public var sensorsSocket: URL { home.appendingPathComponent("sensors.sock") }
     public var hueFile: URL { home.appendingPathComponent("hue.json") }
     public var logsDirectory: URL { home.appendingPathComponent("logs") }
     public var homeKitFile: URL { home.appendingPathComponent("homekit.json") }

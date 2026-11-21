@@ -24,6 +24,7 @@ func usage() -> Never {
       forget-host [<ip>]   Forget the pinned TLS certificate of a Hue/UniFi host (after a firmware update or reset); no argument lists pinned hosts
       pair-hue             Pair with the Hue bridge (press its link button first)
       create-scene <name> --room <room|zone> --kelvin <K> [--brightness 1-100] [--replace]
+      check-hue [name]  Read-only: scenes vs light_defaults, smart scenes (Natural light) and Hue-app routines, to see what changes the lights besides HouseBridge
                            Save a scene on the Hue bridge with an exact white temperature (default brightness 100)
       pair-lutron [<ip>] [--out <dir>]  Pair with a Lutron Smart Bridge (Pro/RA2 Select) and write ca.pem, cert.pem, key.pem (default: <config home>/lutron)
       import-homebridge    Read a running Homebridge's config (found over Bonjour and its web UI, or --from-file) and add it to your HouseBridge config
@@ -443,6 +444,18 @@ case "create-scene":
         fileLog.write(category: "hue", message: "\(r.updated ? "updated" : "created") scene “\(name)” in “\(room)” (\(kelvin) K, \(r.lights) lights)")
         print("\(r.updated ? "Updated" : "Created") scene “\(name)” in “\(room)”: \(kelvin) K at \(Int(brightness))% on \(r.lights) light(s). It now appears in the Hue app.")
     } catch { fail("create-scene failed: \(describeError(error))") }
+
+case "check-hue":
+    // What the Hue bridge itself does to the lights (scenes vs light_defaults, smart scenes, routines). Read-only.
+    let config = loadConfig()
+    guard let h = config.hue, let creds = HueClient.load(from: paths.hueFile), creds.host == h.host else {
+        fail("Hue is not paired yet. Run: housebridgectl pair-hue")
+    }
+    let filter = args.dropFirst().first(where: { !$0.hasPrefix("-") })
+    do {
+        let target = config.lightDefaults.map { (kelvin: $0.kelvin, tolerance: $0.toleranceKelvin) }
+        print(try await HueClient(credentials: creds, hosts: KnownHosts(url: paths.knownHostsFile)).scheduleReport(target: target, filter: filter))
+    } catch { fail("check-hue failed: \(describeError(error))") }
 
 case "camera-test":
     let config = loadConfig()

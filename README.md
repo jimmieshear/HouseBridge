@@ -52,9 +52,10 @@ Each rule has a `when:` trigger and a list of `then:` actions.
 | **Actions** | `light`, `toggle`, `scene`, `cycle_scenes`, `dim`, `wait`, `log` |
 | **Light timer** | `off_after_seconds` on a `light` action (with `on: true`) turns the same lights off that long after the last such action; new activity restarts it and any later command for those lights cancels it |
 | **Per rule** | `between`, `cooldown_seconds`, `enabled`, `homekit_switch` |
+| **Home.app button** | `buttons:` publishes a button to Home.app (needs `homekit:`) that runs a list of actions when pressed and springs back a second later, e.g. one tap to put every light at the default white: `buttons: [{ name: Default Lights, then: [{ action: scene, name: SanJose-Default, room: Bedroom, brightness: 100 }, { action: light, room: Stairs, on: true, brightness: 100 }] }]`. The `then:` list takes the same actions as a rule. Pressing it works like the window's *Run now*: it ignores presence holds and time windows, and Siri and Home automations can press it too |
 | **Home.app switch** | `homekit_switch: Name` on a rule that has a `light` action with `off_after_seconds` publishes a switch to Home.app (needs `homekit:`). It turns on when the rule fires and off when the auto-off timer ends. Turning it on in Home.app runs the rule's actions (ignoring its time window and presence holds), so the same timeout applies; turning it off cancels the timer and switches the lights off. Several rules can share one name |
 | **Kasa plug in Home.app** | `homekit: true` on a plug under `kasa: plugs:` (needs `homekit:`) publishes it to Home.app as an Outlet on the HouseBridge bridge, for plugs that have no HomeKit of their own. Home.app on/off goes to the plug over the LAN; changes from rules, the Kasa app or the plug's button show up in Home.app within a minute |
-| **Default light temperature** | `light_defaults: { kelvin: 3000 }` keeps every Hue light that is on at that white temperature, checked every `check_seconds` (30) with a `tolerance_kelvin` (100). `overrides:` take `light:`, `zone:` or `room:` plus `kelvin:` or `ignore: true`; the most specific wins. Lights showing a color, or in a room/zone with a Hue scene recalled, are left alone. `housebridgectl list hue` shows the temperature each scene sets, so you can copy the one you like (for example Bright) |
+| **Default light temperature** | `light_defaults: { kelvin: 3000 }` keeps every Hue light that is on at that white temperature, checked every `check_seconds` (30) with a `tolerance_kelvin` (100). `overrides:` take `light:`, `zone:` or `room:` plus `kelvin:` or `ignore: true`, and optionally `reset_color: true` (a light that is showing a color is normally left alone; with this it is put back to the white too, which fights colors you choose on purpose); the most specific wins. Lights showing a color, or in a room/zone with a Hue scene recalled, are left alone. `housebridgectl list hue` shows the temperature each scene sets, so you can copy the one you like (for example Bright). If lights keep being changed back at certain times, `housebridgectl check-hue [name]` shows what the bridge itself has set up: each scene's temperature against your `kelvin` (ok / DIFFERENT), the smart scenes (Natural light and other time-based ones) with their time slots, and the routines made in the Hue app. Rooms with a recalled scene or an active smart scene are left alone |
 
 ### Time of day and sunrise/sunset
 
@@ -150,6 +151,29 @@ alarms:
 **Sound on the HomePods.** HouseBridge can't talk to HomePods itself, so it runs two Shortcuts with `shortcuts run`. In the Shortcuts app create *Dog Barking*: **Set Playback Destination** → your HomePods, then **Repeat** (say 200 times) → **Play Sound** (a barking audio file, set to wait until finished). Create *Stop Dog Barking* with **Stop Playing** (and, if needed, the same Set Playback Destination first). Try them with `shortcuts run "Dog Barking"` in Terminal. Shortcuts run as the logged-in user, so the Mac must be signed in. Omit `sound:` for lights only.
 
 Run `housebridgectl devices` for a catalog of what each device reports, what it can do, and example rules to paste in.
+
+## HomeKit sensors (smoke, CO, temperature, humidity)
+
+HouseBridge can react to HomeKit accessories that exist only in Home.app, such as an Owl smoke detector, and show their temperature and humidity in the window. HomeKit is only available to apps built from the iOS SDK, so a small hidden helper, **HouseBridgeHomeKit**, reads the accessories and passes each reading to HouseBridge over a local socket (`~/.config/housebridge/sensors.sock`, readable by you only). It never writes to an accessory. The helper lives inside `HouseBridge.app` (`Contents/Helpers/`): HouseBridge starts it when `home_sensors:` is configured, restarts it if it dies, and it quits by itself once HouseBridge has been gone for a minute and a half. There is nothing to launch or add to Login Items besides HouseBridge itself.
+
+```yaml
+home_sensors:
+  devices: [Owl upstairs Master]     # HomeKit accessories, names as in Home.app; "*" for every sensor the helper finds
+  unifi: [USL Environmental]         # UniFi Protect sensors, read straight from the console (no helper, no Homebridge)
+
+rules:
+  - name: Smoke, lights on
+    when: { homekit: Owl upstairs Master, event: smoke, state: detected }   # event: smoke | co; state: detected | clear
+    then:
+      - { action: light, room: Hallway, on: true, brightness: 100 }
+```
+
+- **UniFi environmental sensors** (`unifi:`) need none of this: HouseBridge reads their temperature and humidity (and light, if the sensor has it) from the Protect console it is already connected to, on every live update and again every 5 minutes. With a `homekit:` section the same readings are also published to Home.app as Temperature and Humidity sensors on the sensor's accessory, so Homebridge's copy is no longer needed. Use `devices:` only for accessories that exist solely in Home.app (like the Owl); only they need the helper.
+- **Build:** `./scripts/bundle.sh` builds the helper with `scripts/build-homekit-helper.sh` and embeds it (needs Xcode signed in to your developer team, the HomeKit capability on the App ID, and every Mac that will run it registered in the developer portal; without that the app is built without sensor support). The first time, macOS asks to let *HouseBridge* access Home data: allow it. If it does not connect, `~/.config/housebridge/logs/homekit-helper.log` has its own messages and `~/Library/Logs/DiagnosticReports` any crash report (a `TCC` crash means the Home permission or the usage description is missing). From a build folder instead of the app, set `HOUSEBRIDGE_HOMEKIT_HELPER` to the path of `HouseBridgeHomeKit.app`.
+- **The window** shows the temperature and humidity of each sensor in large type under the HouseBridge icon (red above 80°F, blue below 68°F, green between; greyed when old or disconnected), and a *Sensors* row per accessory: temperature (°F), humidity, air quality if the accessory has it, and Smoke / CO state, greyed out when the reading is old or the helper is not connected (the *Home sensors* connection turns red: **no alarms are being watched while it is red**).
+- **Smoke and CO rules are never paused** by a presence hold. An alarm that is already on when HouseBridge starts is reported at once; unreachable sensors keep their last alarm state.
+- **Do not make HouseBridge your only smoke response.** The detector's own siren and Apple's critical alerts must work without it; this is for lights and similar extras. HouseBridge or the helper being down means no events.
+- The development profile for the helper expires after a year; rebuild it then.
 
 ## HomeKit bridge
 

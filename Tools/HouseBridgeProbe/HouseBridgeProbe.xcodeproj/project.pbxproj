@@ -1,0 +1,41 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1; classes = {}; objectVersion = 56;
+	objects = {
+		A1 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2; };
+		A2 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		A3 /* HouseBridgeProbe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HouseBridgeProbe.entitlements; sourceTree = "<group>"; };
+		A4 /* HouseBridgeProbe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HouseBridgeProbe.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A5 = {isa = PBXGroup; children = (A2, A3, A6); sourceTree = "<group>"; };
+		A6 /* Products */ = {isa = PBXGroup; children = (A4); name = Products; sourceTree = "<group>"; };
+		A7 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1); runOnlyForDeploymentPostprocessing = 0; };
+		A8 /* HouseBridgeProbe */ = {
+			isa = PBXNativeTarget; buildConfigurationList = B3; buildPhases = (A7); buildRules = (); dependencies = ();
+			name = HouseBridgeProbe; productName = HouseBridgeProbe; productReference = A4; productType = "com.apple.product-type.application";
+		};
+		A9 /* Project object */ = {
+			isa = PBXProject; attributes = {LastUpgradeCheck = 2700;}; buildConfigurationList = B1; compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A5; productRefGroup = A6;
+			projectDirPath = ""; projectRoot = ""; targets = (A8);
+		};
+		B1 = {isa = XCConfigurationList; buildConfigurations = (C1, C2); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+		B3 = {isa = XCConfigurationList; buildConfigurations = (C3, C4); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;};
+		C1 /* Debug */ = {isa = XCBuildConfiguration; name = Debug; buildSettings = {SDKROOT = iphoneos; SWIFT_VERSION = 5.0; ONLY_ACTIVE_ARCH = YES;};};
+		C2 /* Release */ = {isa = XCBuildConfiguration; name = Release; buildSettings = {SDKROOT = iphoneos; SWIFT_VERSION = 5.0;};};
+		C3 /* Debug */ = {isa = XCBuildConfiguration; name = Debug; buildSettings = {
+			CODE_SIGN_STYLE = Automatic; CODE_SIGN_ENTITLEMENTS = HouseBridgeProbe.entitlements; DEVELOPMENT_TEAM = F9CCHTJ5E8;
+			PRODUCT_BUNDLE_IDENTIFIER = local.housebridge.probe; PRODUCT_NAME = HouseBridgeProbe; GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_NSHomeKitUsageDescription = "Reads the HomeKit accessories and sensor values so HouseBridge can show them.";
+			INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES; SUPPORTS_MACCATALYST = YES; SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO; DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO;
+			IPHONEOS_DEPLOYMENT_TARGET = 27.0; TARGETED_DEVICE_FAMILY = "1,2,6"; ENABLE_APP_SANDBOX = NO;
+		};};
+		C4 /* Release */ = {isa = XCBuildConfiguration; name = Release; buildSettings = {
+			CODE_SIGN_STYLE = Automatic; CODE_SIGN_ENTITLEMENTS = HouseBridgeProbe.entitlements; DEVELOPMENT_TEAM = F9CCHTJ5E8;
+			PRODUCT_BUNDLE_IDENTIFIER = local.housebridge.probe; PRODUCT_NAME = HouseBridgeProbe; GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_NSHomeKitUsageDescription = "Reads the HomeKit accessories and sensor values so HouseBridge can show them.";
+			INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES; INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES; SUPPORTS_MACCATALYST = YES; SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO; DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO;
+			IPHONEOS_DEPLOYMENT_TARGET = 27.0; TARGETED_DEVICE_FAMILY = "1,2,6"; ENABLE_APP_SANDBOX = NO;
+		};};
+	};
+	rootObject = A9;
+}

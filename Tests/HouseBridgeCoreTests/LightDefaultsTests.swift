@@ -107,3 +107,52 @@ final class RequestGateTests: XCTestCase {
         XCTAssertTrue(failure.isRateLimited)
     }
 }
+
+final class ResetColorTests: XCTestCase {
+    private func setup(_ extra: String) throws -> (LightDefaults, HueInventory) {
+        let d = try XCTUnwrap(ConfigLoader.parse("hue: { host: 1.1.1.1 }\nlight_defaults:\n  kelvin: 3000\n\(extra)").lightDefaults)
+        var inv = HueInventory()
+        inv.lights = ["Pink1", "Pink2", "Plain"].map { HueInventory.Item(id: $0, name: $0, groupedLightId: nil) }
+        var room = HueInventory.Item(id: "room-family", name: "Family room", groupedLightId: "g"); room.lightIds = ["Pink1", "Pink2"]
+        var other = HueInventory.Item(id: "room-other", name: "Other", groupedLightId: "g2"); other.lightIds = ["Plain"]
+        inv.rooms = [room, other]
+        return (d, inv)
+    }
+    private func color(_ id: String) -> HueLightState {   // mirek not valid: the light is showing a color
+        HueLightState(id: id, name: id, on: true, mirek: nil, minMirek: 153, maxMirek: 500, brightness: 80)
+    }
+
+    func testColorLightsAreLeftAloneUnlessTheirOverrideResetsThem() throws {
+        let (plain, inv) = try setup("")
+        XCTAssertTrue(LightTemperature.plan(states: [color("Pink1")], inventory: inv, activeGroups: [], defaults: plain).isEmpty)
+
+        let (reset, inv2) = try setup("  overrides:\n    - { room: Family room, kelvin: 3000, reset_color: true }")
+        let plan = LightTemperature.plan(states: [color("Pink1"), color("Pink2"), color("Plain")], inventory: inv2, activeGroups: [], defaults: reset)
+        XCTAssertEqual(plan.map(\.lightID), ["Pink1", "Pink2"], "only the room that asked for it; 'Plain' is in another room")
+        XCTAssertTrue(plan.allSatisfy { $0.fromColor && $0.toKelvin == 3003 && $0.toMirek == 333 && $0.room == "Family room" })
+        // A scene recalled in the room still wins.
+        XCTAssertTrue(LightTemperature.plan(states: [color("Pink1")], inventory: inv2, activeGroups: ["room-family"], defaults: reset).isEmpty)
+        // Off lights are not touched.
+        var off = color("Pink1"); off.on = false
+        XCTAssertTrue(LightTemperature.plan(states: [off], inventory: inv2, activeGroups: [], defaults: reset).isEmpty)
+    }
+
+    func testConfigRejectsResetColorWithIgnore() {
+        XCTAssertThrowsError(try ConfigLoader.parse("hue: { host: 1.1.1.1 }\nlight_defaults:\n  kelvin: 3000\n  overrides:\n    - { light: A, ignore: true, reset_color: true }"))
+        XCTAssertNoThrow(try ConfigLoader.parse("hue: { host: 1.1.1.1 }\nlight_defaults:\n  kelvin: 3000\n  overrides:\n    - { light: A, kelvin: 2700, reset_color: true }"))
+    }
+
+    func testReportShowsColorModeLights() {
+        let lights: [JSON] = [
+            ["id": "a", "metadata": ["name": "Familyroom1"], "on": ["on": true], "dimming": ["brightness": 100.0],
+             "color_temperature": ["mirek_valid": false], "color": ["xy": ["x": 0.4573, "y": 0.2407]]],
+            ["id": "b", "metadata": ["name": "Familyroom2"], "on": ["on": true], "dimming": ["brightness": 100.0],
+             "color_temperature": ["mirek": 333, "mirek_valid": true]],
+            ["id": "c", "metadata": ["name": "Stairs1"], "on": ["on": true], "dimming": ["brightness": 50.0]]]   // no white temperature: not listed
+        let text = HueSchedule.report(scenes: [], smartScenes: [], routines: [], groupNames: [:], target: nil,
+                                      lights: lights, lightRooms: ["a": "Family room", "b": "Family room", "c": "Stairs"])
+        XCTAssertTrue(text.contains("Family room / Familyroom1: on 100%  COLOR MODE xy(0.457, 0.241)"), text)
+        XCTAssertTrue(text.contains("Family room / Familyroom2: on 100%  white 3003 K"), text)
+        XCTAssertFalse(text.contains("Stairs1"), text)
+    }
+}

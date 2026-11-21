@@ -3,10 +3,14 @@
 #
 #   HouseBridge.app/Contents/MacOS/HouseBridge     menu bar app (double-click)
 #   HouseBridge.app/Contents/MacOS/housebridgectl  command-line tool, same build
+#   HouseBridge.app/Contents/Helpers/HouseBridgeHomeKit.app  HomeKit helper (Mac Catalyst, own signature); HouseBridge
+#                                                   starts it itself when `home_sensors:` is configured
 #
 # Universal (Apple silicon + Intel). Links only system frameworks; the Swift runtime ships with macOS 15+,
 # so nothing else needs installing on the target Mac.
 # Usage: scripts/bundle.sh [--sign "Developer ID Application: Your Name (TEAMID)"]
+#   The helper is built with scripts/build-homekit-helper.sh (needs Xcode signed in to the developer team). If that
+#   fails the app is still built, just without sensor support. SKIP_HOMEKIT_HELPER=1 leaves it out on purpose.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,6 +28,17 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp "$BIN/HouseBridgeMenu" "$APP/Contents/MacOS/HouseBridge"
 cp "$BIN/housebridgectl"  "$APP/Contents/MacOS/housebridgectl"
+
+HELPER_NOTE="not included"
+if [[ "${SKIP_HOMEKIT_HELPER:-0}" != "1" ]]; then
+  if ./scripts/build-homekit-helper.sh --no-copy > .build/homekit-helper-build.log 2>&1; then
+    mkdir -p "$APP/Contents/Helpers"
+    ditto .build/homekit-helper/Build/Products/Release-maccatalyst/HouseBridgeHomeKit.app "$APP/Contents/Helpers/HouseBridgeHomeKit.app"
+    HELPER_NOTE="included"
+  else
+    echo "warning: HouseBridgeHomeKit helper did not build (see .build/homekit-helper-build.log); continuing without it" >&2
+  fi
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -43,19 +58,23 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <dict><key>NSAllowsLocalNetworking</key><true/></dict>
   <key>NSLocalNetworkUsageDescription</key>
   <string>HouseBridge talks to your Lutron, Hue, UniFi, Kasa and Matter devices on the local network.</string>
+  <key>NSHomeKitUsageDescription</key>
+  <string>HouseBridge reads your smoke, carbon monoxide, temperature and humidity sensors from Home so it can react to them and show them. It never changes your accessories.</string>
   <key>NSBonjourServices</key>
   <array><string>_hap._tcp</string><string>_matter._tcp</string><string>_matterc._udp</string><string>_meshcop._udp</string></array>
 </dict></plist>
 PLIST
 
-codesign --force --deep --options runtime --sign "$IDENTITY" "$APP/Contents/MacOS/housebridgectl"
-codesign --force --deep --options runtime --sign "$IDENTITY" "$APP"
+# No --deep on the app: the helper already carries its own signature and HomeKit profile, and re-signing it
+# (ad-hoc, without the entitlement) would stop it from reading HomeKit.
+codesign --force --options runtime --sign "$IDENTITY" "$APP/Contents/MacOS/housebridgectl"
+codesign --force --options runtime --sign "$IDENTITY" "$APP"
 codesign --verify --deep --strict "$APP"
 
 # ditto keeps the signature and attributes intact; plain zip/cp-over-network can break them.
 ditto -c -k --keepParent "$APP" HouseBridge.zip
 
 echo
-echo "Built $APP and HouseBridge.zip"
+echo "Built $APP and HouseBridge.zip (HomeKit helper: $HELPER_NOTE)"
 lipo -archs "$APP/Contents/MacOS/HouseBridge" | sed 's/^/  architectures: /'
 echo "  non-system libraries linked: $(otool -L "$APP/Contents/MacOS/HouseBridge" | grep 'compatibility version' | grep -vE '^\s+(/System/|/usr/lib/)' | wc -l | tr -d ' ')"

@@ -10,6 +10,8 @@ public struct Config: Sendable {
     public var unifi: UnifiConfig?
     public var kasa: KasaConfig?
     public var homekit: HomeKitConfig?
+    /// Smoke/CO alarms and readings from HomeKit accessories, fed by the HouseBridgeHomeKit helper.
+    public var homeSensors: HomeSensorsConfig?
     /// Where the house is; needed for `sunrise`/`sunset` schedules.
     public var location: GeoLocation?
     public var presence: [PresenceHold] = []
@@ -23,14 +25,18 @@ public struct Config: Sendable {
     /// Kasa plugs published to Home.app as outlets, in config order.
     public var homekitOutlets: [String] { kasa?.plugs.filter(\.homekit).map(\.name) ?? [] }
 
-    /// Distinct `homekit_switch` names of the enabled rules, in config order.
+    /// Distinct `homekit_switch` names of the enabled rules, then the `buttons:`, in config order. Both are published
+    /// to Home.app as switches; a button resets itself a second after it is pressed.
     public var homekitSwitches: [String] {
         var seen = Set<String>(), out: [String] = []
         for rule in rules where rule.enabled {
-            if let name = rule.homekitSwitch, seen.insert(name.lowercased()).inserted { out.append(name) }
+            if let name = rule.homekitSwitch ?? rule.homekitButton, seen.insert(name.lowercased()).inserted { out.append(name) }
         }
         return out
     }
+
+    /// Names (as written) of the `buttons:`.
+    public var homekitButtons: [String] { rules.compactMap { $0.enabled ? $0.homekitButton : nil } }
 }
 
 public struct LutronConfig: Sendable {
@@ -46,6 +52,24 @@ public struct LutronConfig: Sendable {
             .filter { !FileManager.default.isReadableFile(atPath: $0.1) }
             .map { "\($0.0): \($0.1)" }
     }
+}
+
+public struct HomeSensorsConfig: Sendable {
+    /// HomeKit accessory names as shown in Home.app (case-insensitive), or "*" for every sensor the helper reports.
+    /// These need the HouseBridgeHomeKit helper.
+    public var devices: [String]
+    /// UniFi Protect sensor names (or "*"), read straight from the console: no helper and no Homebridge needed.
+    public var unifi: [String]
+    public init(devices: [String] = [], unifi: [String] = []) { self.devices = devices; self.unifi = unifi }
+
+    /// Only HomeKit accessories need the helper.
+    public var needsHelper: Bool { !devices.isEmpty }
+
+    private static func matches(_ list: [String], _ name: String) -> Bool {
+        list.contains { $0 == "*" || $0.caseInsensitiveCompare(name) == .orderedSame }
+    }
+    func includes(_ name: String) -> Bool { HomeSensorsConfig.matches(devices, name) }
+    func includesUnifi(_ name: String) -> Bool { HomeSensorsConfig.matches(unifi, name) }
 }
 
 public struct HueConfig: Sendable {
@@ -130,6 +154,9 @@ public struct Rule: Sendable {
     public var ignorePresence = false
     /// Name of a Home.app switch that mirrors this rule's auto-off lights (on while they are on, off when the timer ends).
     public var homekitSwitch: String?
+    /// Set on the rules made from `buttons:`: the Home.app button that runs this rule's actions when pressed. Such a rule
+    /// has no real trigger (its `trigger` never matches an event).
+    public var homekitButton: String?
     public var actions: [Action]
 }
 
@@ -248,7 +275,7 @@ public enum ConfigLoader {
         let root = try YAML.parse(text)
         guard case .map(let top) = root else { throw ConfigError(path: "", message: "top level must be a map") }
         let r = Reader(map: top, path: "")
-        try r.rejectUnknown(["lutron", "hue", "light_defaults", "unifi", "kasa", "homekit", "location", "presence", "simulate", "holidays", "alarms", "timing", "rules"])
+        try r.rejectUnknown(["lutron", "hue", "light_defaults", "unifi", "kasa", "homekit", "home_sensors", "location", "presence", "simulate", "holidays", "alarms", "timing", "rules", "buttons"])
 
         var config = Config()
         if let l = try r.reader("lutron") {
@@ -278,6 +305,14 @@ public enum ConfigLoader {
             cfg.passwordEnv = try u.string("password_env")
             cfg.clearAfterSeconds = try u.double("clear_after_seconds") ?? 30
             config.unifi = cfg
+        }
+        if let s = try r.reader("home_sensors") {
+            try s.rejectUnknown(["devices", "unifi"])
+            let devices = try s.stringList("devices"), unifi = try s.stringList("unifi")
+            guard !devices.isEmpty || !unifi.isEmpty else {
+                throw ConfigError(path: s.path, message: "needs 'devices:' (HomeKit accessory names as shown in Home.app, e.g. [Owl upstairs Master]) and/or 'unifi:' (UniFi Protect sensor names, e.g. [USL Environmental]); \"*\" means all")
+            }
+            config.homeSensors = HomeSensorsConfig(devices: devices, unifi: unifi)
         }
         if let k = try r.reader("kasa") {
             try k.rejectUnknown(["username", "password", "password_env", "plugs"])
@@ -372,6 +407,13 @@ public enum ConfigLoader {
                 config.rules.append(try parseRule(Reader(map: m, path: "rules[\(i)]")))
             }
         }
+        if let buttons = top["buttons"] {
+            guard case .array(let items) = buttons else { throw ConfigError(path: "buttons", message: "must be a list") }
+            for (i, item) in items.enumerated() {
+                guard case .map(let m) = item else { throw ConfigError(path: "buttons[\(i)]", message: "must be a map") }
+                config.rules.append(try parseButton(Reader(map: m, path: "buttons[\(i)]")))
+            }
+        }
         try validate(config)
         return config
     }
@@ -416,13 +458,25 @@ public enum ConfigLoader {
         if config.homekit != nil && config.unifi == nil {
             throw ConfigError(path: "homekit", message: "publishes UniFi Protect devices to Home.app, so it needs a 'unifi:' section")
         }
+        if let sensors = config.homeSensors, !sensors.unifi.isEmpty, config.unifi == nil {
+            throw ConfigError(path: "home_sensors.unifi", message: "reads UniFi Protect sensors, so it needs a 'unifi:' section")
+        }
         if let kasa = config.kasa, config.homekit == nil, let plug = kasa.plugs.first(where: \.homekit) {
             throw ConfigError(path: "kasa.plugs", message: "plug '\(plug.name)' has 'homekit: true', which needs a 'homekit:' section")
         }
         if config.lightDefaults != nil && config.hue == nil {
             throw ConfigError(path: "light_defaults", message: "sets the color temperature of Hue lights, so it needs a 'hue:' section")
         }
+        var homekitNames = Set<String>()
         for rule in config.rules {
+            if let button = rule.homekitButton {
+                guard config.homekit != nil else { throw ConfigError(path: "buttons", message: "button '\(button)' is published to Home.app, so it needs a 'homekit:' section") }
+                guard homekitNames.insert(button.lowercased()).inserted,
+                      !config.rules.contains(where: { $0.homekitSwitch?.lowercased() == button.lowercased() }) else {
+                    throw ConfigError(path: "buttons", message: "two Home.app switches or buttons are named '\(button)'")
+                }
+                continue
+            }
             guard let name = rule.homekitSwitch else { continue }
             let path = "rules.\(rule.name).homekit_switch"
             guard config.homekit != nil else { throw ConfigError(path: path, message: "needs a 'homekit:' section") }
@@ -440,6 +494,8 @@ public enum ConfigLoader {
                     if config.lutron == nil { throw ConfigError(path: "presence", message: "hold '\(hold.name)' uses Lutron but there is no 'lutron:' section") }
                 case .unifi:
                     if config.unifi == nil { throw ConfigError(path: "presence", message: "hold '\(hold.name)' uses UniFi but there is no 'unifi:' section") }
+                case .homekit:
+                    if config.homeSensors == nil { throw ConfigError(path: "presence", message: "hold '\(hold.name)' uses a HomeKit sensor but there is no 'home_sensors:' section") }
                 case .clock: break
                 }
             }
@@ -470,6 +526,10 @@ public enum ConfigLoader {
                 if config.lutron == nil { throw ConfigError(path: "rules", message: "rule '\(rule.name)' uses Lutron but there is no 'lutron:' section") }
             case .unifi:
                 if config.unifi == nil { throw ConfigError(path: "rules", message: "rule '\(rule.name)' uses UniFi but there is no 'unifi:' section") }
+            case .homekit:
+                if rule.homekitButton == nil && config.homeSensors == nil {
+                    throw ConfigError(path: "rules", message: "rule '\(rule.name)' uses a HomeKit sensor but there is no 'home_sensors:' section")
+                }
             case .clock:
                 if rule.trigger.schedule?.usesSun == true && config.location == nil {
                     throw ConfigError(path: "rules", message: "rule '\(rule.name)' uses sunrise/sunset but there is no 'location:' section (latitude and longitude)")
@@ -498,6 +558,8 @@ public enum ConfigLoader {
 
     private static let picoGestures: Set<String> = ["press", "release", "tap", "double_tap", "hold", "hold_release"]
     private static let unifiStates: Set<String> = ["start", "end", "clear", "open", "closed"]
+    private static let homekitStates: Set<String> = ["detected", "clear"]
+    private static let homekitEvents: Set<String> = ["smoke", "co", "*"]
 
     private static func parseHold(_ r: Reader) throws -> PresenceHold {
         try r.rejectUnknown(["name", "when", "hold_hours", "hold_minutes", "pauses"])
@@ -534,7 +596,7 @@ public enum ConfigLoader {
         return PresenceHold(name: try r.requireString("name"), triggers: triggers, duration: seconds, pauses: pauses)
     }
 
-    /// One `when:` map: pico / switch / unifi / at.
+    /// One `when:` map: pico / switch / unifi / homekit / at.
     static func parseTrigger(_ w: Reader) throws -> TriggerSpec {
         let trigger: TriggerSpec
         if let device = try w.string("pico") {
@@ -558,6 +620,17 @@ public enum ConfigLoader {
                 throw ConfigError(path: w.path + ".state", message: "'\(state)' is not one of \(unifiStates.sorted().joined(separator: ", "))")
             }
             trigger = TriggerSpec(source: .unifi, device: device, input: try w.string("event") ?? "motion", kind: state)
+        } else if let device = try w.string("homekit") {
+            try w.rejectUnknown(["homekit", "event", "state"])
+            let state = try w.string("state") ?? "detected"
+            guard homekitStates.contains(state) else {
+                throw ConfigError(path: w.path + ".state", message: "'\(state)' is not one of \(homekitStates.sorted().joined(separator: ", "))")
+            }
+            let event = (try w.string("event") ?? "smoke").lowercased()
+            guard homekitEvents.contains(event) else {
+                throw ConfigError(path: w.path + ".event", message: "'\(event)' is not one of \(homekitEvents.sorted().joined(separator: ", "))")
+            }
+            trigger = TriggerSpec(source: .homekit, device: device, input: event, kind: state)
         } else if let at = try w.string("at") {
             try w.rejectUnknown(["at", "offset_minutes", "days"])
             let anchor: Schedule.Anchor
@@ -591,9 +664,27 @@ public enum ConfigLoader {
             let schedule = Schedule(anchor: anchor, offsetMinutes: offset, days: days)
             trigger = TriggerSpec(source: .clock, device: nil, input: schedule.key, kind: "fire", schedule: schedule)
         } else {
-            throw ConfigError(path: w.path, message: "needs one of 'pico:', 'switch:', 'unifi:' (naming the device, \"*\" for any) or 'at:' (a time, sunrise or sunset)")
+            throw ConfigError(path: w.path, message: "needs one of 'pico:', 'switch:', 'unifi:', 'homekit:' (naming the device, \"*\" for any) or 'at:' (a time, sunrise or sunset)")
         }
         return trigger
+    }
+
+    /// `buttons:` entry: a name and the actions to run when it is pressed in Home.app. Stored as a rule that no event can
+    /// trigger, so pressing it goes through the same path as the window's "Run now".
+    private static func parseButton(_ r: Reader) throws -> Rule {
+        try r.rejectUnknown(["name", "then"])
+        let name = try r.requireString("name")
+        guard !name.isEmpty, name.count <= 64 else { throw ConfigError(path: r.path + ".name", message: "must be 1-64 characters") }
+        guard case .array(let rawActions)? = r.map["then"], !rawActions.isEmpty else {
+            throw ConfigError(path: r.path + ".then", message: "needs a non-empty list of actions")
+        }
+        var actions: [Action] = []
+        for (i, raw) in rawActions.enumerated() {
+            guard case .map(let m) = raw else { throw ConfigError(path: "\(r.path).then[\(i)]", message: "must be a map") }
+            actions.append(try parseAction(Reader(map: m, path: "\(r.path).then[\(i)]")))
+        }
+        let never = TriggerSpec(source: .homekit, device: "(Home.app button)", input: "button", kind: "press")
+        return Rule(name: "button: \(name)", enabled: true, trigger: never, homekitButton: name, actions: actions)
     }
 
     private static func parseRule(_ r: Reader) throws -> Rule {

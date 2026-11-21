@@ -5,6 +5,8 @@ public enum Source: String, Sendable {
     case lutronSwitch = "switch"
     case unifi
     case clock
+    /// A smoke/CO alarm (or other sensor) reported by the HouseBridgeHomeKit helper; see `HomeSensors`.
+    case homekit
 }
 
 /// Something that happened in the house. Rules match against these.
@@ -13,6 +15,7 @@ public enum Source: String, Sendable {
 ///            press | release | tap | double_tap | hold | hold_release
 /// - switch:  `input` is "power", `kind` is on | off
 /// - clock:   `input` is the schedule key (e.g. "18:30", "sunset-30"), `kind` is "fire"
+/// - homekit: `input` is smoke | co, `kind` is detected | clear
 /// - unifi:   `input` is motion | person | vehicle | animal | package | licensePlate | ring | contact | leak ...,
 ///            `kind` is start | end | clear (contact: open | closed)
 public struct TriggerEvent: Sendable {
@@ -72,7 +75,7 @@ public struct LogEntry: Sendable, Identifiable {
     }
 }
 
-public enum Subsystem: String, Sendable, CaseIterable { case lutron, hue, unifi, kasa, homekit }
+public enum Subsystem: String, Sendable, CaseIterable { case lutron, hue, unifi, kasa, homekit, sensors }
 
 public enum ConnectionStatus: Sendable, Equatable {
     case notConfigured

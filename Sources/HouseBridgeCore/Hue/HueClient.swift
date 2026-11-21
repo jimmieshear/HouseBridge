@@ -156,16 +156,31 @@ public final class HueClient: @unchecked Sendable {
             let schema = ct["mirek_schema"] as? JSON
             return HueLightState(id: id, name: name, on: (l["on"] as? JSON)?["on"] as? Bool ?? false,
                                  mirek: (ct["mirek_valid"] as? Bool ?? false) ? ct["mirek"] as? Int : nil,
-                                 minMirek: schema?["mirek_minimum"] as? Int ?? 153, maxMirek: schema?["mirek_maximum"] as? Int ?? 500)
+                                 minMirek: schema?["mirek_minimum"] as? Int ?? 153, maxMirek: schema?["mirek_maximum"] as? Int ?? 500,
+                                 brightness: (l["dimming"] as? JSON)?["brightness"] as? Double)
         }
     }
 
-    /// Ids of the rooms and zones that currently have a scene recalled.
+    /// Ids of the rooms and zones that currently have a scene recalled: a regular scene, or a smart scene (Natural light
+    /// and other time-based ones, which move the lights through the day by themselves and must not be fought).
     public func activeSceneGroups() async throws -> Set<String> {
-        Set(try await request("GET", "/resource/scene").compactMap { s in
-            guard let active = (s["status"] as? JSON)?["active"] as? String, active != "inactive" else { return nil }
-            return (s["group"] as? JSON)?["rid"] as? String
-        })
+        let scenes = try await request("GET", "/resource/scene")
+        let smart = (try? await request("GET", "/resource/smart_scene")) ?? []   // not every bridge has them
+        return HueClient.activeGroups(scenes: scenes, smartScenes: smart)
+    }
+
+    static func activeGroups(scenes: [JSON], smartScenes: [JSON]) -> Set<String> {
+        var out = Set<String>()
+        for s in scenes {
+            guard let active = (s["status"] as? JSON)?["active"] as? String, active != "inactive",
+                  let group = (s["group"] as? JSON)?["rid"] as? String else { continue }
+            out.insert(group)
+        }
+        for s in smartScenes {
+            guard (s["state"] as? String) == "active", let group = (s["group"] as? JSON)?["rid"] as? String else { continue }
+            out.insert(group)
+        }
+        return out
     }
 
     public func setColorTemperature(lightID: String, mirek: Int, transitionMs: Int = 400) async throws {

@@ -61,6 +61,22 @@ enum ProtectPacket {
 /// Cameras: `event` records (type motion / smartDetectZone / smartDetectLine / ring) are tracked by id so that
 /// later "update" messages (which only carry the changed fields, e.g. `end`) can be tied back to the camera and type.
 /// Sensors: field changes (`isOpened`, `isMotionDetected`, `leakDetectedAt`, ...).
+/// The environmental readings Protect keeps in a sensor's `stats`: `{"temperature": {"value": 12.6, "status": "neutral"}, ...}`.
+/// A live update may carry only the stats that changed, so every key is optional.
+enum ProtectStats {
+    /// `kind` (temperature °C | humidity % | light lux) → value, for the readings that have a number.
+    static func measurements(_ stats: Any?) -> [String: Double] {
+        guard let stats = stats as? JSON else { return [:] }
+        var out: [String: Double] = [:]
+        for kind in ["temperature", "humidity", "light"] {
+            let raw = stats[kind]
+            let number = (raw as? JSON)?["value"] ?? raw
+            if let n = number as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() { out[kind] = n.doubleValue }
+        }
+        return out
+    }
+}
+
 final class ProtectInterpreter {
     struct Device { var id: String; var name: String; var kind: String }
     private struct TrackedEvent {
@@ -150,6 +166,15 @@ final class ProtectInterpreter {
         if flag { flagMoving.insert(id) } else { flagMoving.remove(id) }
         let now = isMoving(id)
         return now == was ? [] : [event(camera, input: "motion", kind: now ? "start" : "end")]
+    }
+
+    /// New environmental readings from a sensor's live update (empty for anything else).
+    func readings(_ update: ProtectUpdate, now: Date = Date()) -> [SensorReading] {
+        guard update.action["modelKey"] as? String == "sensor", let id = update.action["id"] as? String,
+              let sensor = devices[id] else { return [] }
+        return ProtectStats.measurements(update.data["stats"]).sorted { $0.key < $1.key }.map {
+            SensorReading(accessory: "unifi:\(id)", home: "UniFi Protect", name: sensor.name, room: "", kind: $0.key, value: $0.value, date: now)
+        }
     }
 
     private func interpretSensor(id: String, data: JSON) -> [TriggerEvent] {

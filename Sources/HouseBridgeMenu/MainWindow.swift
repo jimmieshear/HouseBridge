@@ -19,6 +19,10 @@ struct MainWindowView: View {
             Divider()
             actions.padding(.horizontal, 16).padding(.vertical, 12)
             Divider()
+            if model.sensorsConfigured {
+                sensorSection.padding(16)
+                Divider()
+            }
             upcoming.padding(16)
             Divider()
             log.padding(16)
@@ -35,6 +39,7 @@ struct MainWindowView: View {
                 Image(nsImage: NSApplication.shared.applicationIconImage)
                     .resizable().frame(width: 88, height: 88)
                 Text("HouseBridge").font(.title3.weight(.semibold))
+                if model.sensorsConfigured { climate }
             }
             .frame(width: 150)
             .padding(.trailing, 36)
@@ -50,7 +55,7 @@ struct MainWindowView: View {
                         let status = model.statuses[sub] ?? .notConfigured
                         GridRow(alignment: .firstTextBaseline) {
                             Circle().fill(status.color).frame(width: 10, height: 10)
-                            Text(sub == .homekit ? "HomeKit" : sub.rawValue.capitalized).fontWeight(.medium)
+                            Text(sub == .homekit ? "HomeKit" : sub == .sensors ? "Home sensors" : sub.rawValue.capitalized).fontWeight(.medium)
                             Text(status.label).foregroundStyle(.secondary).lineLimit(3)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -106,6 +111,134 @@ struct MainWindowView: View {
     private func sidebarButton(_ title: String, role: ButtonRole? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) { Text(title) }
             .buttonStyle(SidebarButtonStyle(destructive: role == .destructive))
+    }
+
+    // MARK: Temperature and humidity
+
+    /// Big temperature and humidity for each sensor that reports them, under the icon. Both take the colour of the
+    /// temperature (red above 80°F, blue below 68°F, green between); greyed when the reading is old or unreachable.
+    private var climate: some View {
+        let groups = Dictionary(grouping: model.sensors.filter { $0.kind == "temperature" || $0.kind == "humidity" }, by: \.accessory)
+            .values.sorted { ($0.first?.name.lowercased() ?? "") < ($1.first?.name.lowercased() ?? "") }
+        return TimelineView(.periodic(from: .now, by: 30)) { context in
+            VStack(spacing: 10) {
+                ForEach(groups.prefix(3), id: \.first?.accessory) { group in
+                    let temperature = group.first { $0.kind == "temperature" }
+                    let humidity = group.first { $0.kind == "humidity" }
+                    let stale = model.sensorIsStale(group, now: context.date)
+                    let color = Self.climateColor(temperature?.value)
+                    VStack(spacing: 1) {
+                        if let t = temperature {
+                            Text(String(format: "%.1f°F", t.value * 9 / 5 + 32))
+                                .font(.system(size: 30, weight: .semibold, design: .rounded)).foregroundStyle(color)
+                                .help(String(format: "%.1f °C", t.value))
+                        }
+                        if let h = humidity {
+                            Text(String(format: "%.0f%% humidity", h.value))
+                                .font(.system(size: 17, weight: .medium, design: .rounded)).foregroundStyle(color)
+                        }
+                        Text(group[0].room.isEmpty ? group[0].name : "\(group[0].name) · \(group[0].room)")
+                            .font(.caption2).foregroundStyle(.secondary).lineLimit(2).multilineTextAlignment(.center)
+                    }
+                    .minimumScaleFactor(0.7)
+                    .opacity(stale ? 0.45 : 1)
+                    .help(stale ? "Old reading, or the sensor or helper is not connected" : "")
+                }
+            }
+        }
+        .padding(.top, 6)
+    }
+
+    private static func climateColor(_ celsius: Double?) -> Color {
+        guard let celsius else { return .green }
+        switch TemperatureBand(celsius: celsius) {
+        case .hot: return .red
+        case .cold: return Color(nsColor: .systemBlue)   // plain .blue is too dark on the window's dark background
+        case .comfortable: return .green
+        }
+    }
+
+    // MARK: Sensors
+
+    /// One row per HomeKit accessory: temperature, humidity, air quality (when the accessory has it) and the smoke / CO state.
+    private var sensorSection: some View {
+        let groups = Dictionary(grouping: model.sensors, by: \.accessory)
+            .values.sorted { ($0.first?.name.lowercased() ?? "") < ($1.first?.name.lowercased() ?? "") }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Sensors").font(.headline)
+                if model.sensorHelperNeeded && !model.sensorHelperConnected {
+                    Text("helper not connected, readings may be old and alarms are not being watched")
+                        .font(.caption).foregroundStyle(.red)
+                }
+            }
+            // Re-evaluated every 30 seconds so "updated" ages and stale readings grey out.
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                if groups.isEmpty {
+                    Text(model.sensorHelperNeeded && !model.sensorHelperConnected ? "Waiting for the HomeKit helper to start…" : "Waiting for readings…")
+                        .foregroundStyle(.secondary)
+                } else {
+                    let rows = VStack(alignment: .leading, spacing: 6) {
+                        ForEach(groups, id: \.first?.accessory) { group in sensorRow(group, now: context.date) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // Exactly as tall as its rows; only a long list (more than four) scrolls, so there is no empty gap.
+                    if groups.count > 4 {
+                        ScrollView { rows }.frame(maxHeight: 190)
+                    } else {
+                        rows
+                    }
+                }
+            }
+        }
+    }
+
+    private func sensorRow(_ group: [SensorReading], now: Date) -> some View {
+        let first = group[0]
+        let newest = group.map(\.date).max() ?? first.date
+        let stale = model.sensorIsStale(group, now: now)
+        func value(_ kind: String) -> Double? { group.first { $0.kind == kind }?.value }
+        return HStack(alignment: .firstTextBaseline, spacing: 14) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(first.name).fontWeight(.medium)
+                Text([first.room, first.home].filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+            }
+            .frame(width: 210, alignment: .leading)
+            if let c = value("temperature") { Text(Self.temperature(c)).help(String(format: "%.1f °C", c)) }
+            if let h = value("humidity") { Text(String(format: "%.0f%% humidity", h)) }
+            if let q = value("air_quality") { Text("air: " + Self.airQuality(q)) }
+            if let p = value("pm25") { Text(String(format: "PM2.5 %.0f µg/m³", p)) }
+            if let s = value("smoke") { alarmBadge("Smoke", s) }
+            if let co = value("co") { alarmBadge("CO", co) }
+            Spacer(minLength: 0)
+            Text(group.contains { !$0.reachable } ? "unreachable" : "updated " + Self.ago(newest, now: now))
+                .font(.caption).foregroundStyle(stale ? .orange : .secondary)
+        }
+        .font(.callout)
+        .opacity(stale ? 0.65 : 1)
+    }
+
+    private func alarmBadge(_ label: String, _ value: Double) -> some View {
+        let alarming = value >= 1
+        return Text(alarming ? "\(label) DETECTED" : "\(label) OK")
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(Capsule().fill(alarming ? Color.red : Color.green.opacity(0.25)))
+            .foregroundStyle(alarming ? Color.white : Color.primary)
+    }
+
+    private static func temperature(_ celsius: Double) -> String { String(format: "%.1f°F", celsius * 9 / 5 + 32) }
+
+    /// HomeKit's AirQuality enumeration.
+    private static func airQuality(_ v: Double) -> String {
+        ["unknown", "excellent", "good", "fair", "inferior", "poor"][max(0, min(5, Int(v)))]
+    }
+
+    private static func ago(_ date: Date, now: Date) -> String {
+        let s = Int(max(0, now.timeIntervalSince(date)))
+        if s < 90 { return "just now" }
+        if s < 3600 { return "\(s / 60) min ago" }
+        return "\(s / 3600) h ago"
     }
 
     // MARK: Upcoming events

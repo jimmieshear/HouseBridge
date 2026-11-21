@@ -15,6 +15,12 @@ final class AppModel: ObservableObject {
     @Published var skippedKeys: Set<String> = []
     /// Setup code and pairing state for the HomeKit bridge, when one is configured.
     @Published var homeKit: HomeKitPairingInfo?
+    /// Latest readings from HomeKit sensors (via the HouseBridgeHomeKit helper), and whether the helper is connected.
+    @Published var sensors: [SensorReading] = []
+    @Published var sensorHelperConnected = false
+    @Published var sensorsConfigured = false
+    /// True when `home_sensors: devices:` lists HomeKit accessories, which are read through the helper.
+    @Published var sensorHelperNeeded = false
 
     @Published var catalog: CatalogResult?
     @Published var catalogLoading = false
@@ -80,6 +86,10 @@ final class AppModel: ObservableObject {
             let config = try ConfigLoader.load(from: paths.configFile)
             hub?.stop()
             statuses = [:]
+            sensors = []
+            sensorHelperConnected = false
+            sensorsConfigured = config.homeSensors != nil
+            sensorHelperNeeded = config.homeSensors?.needsHelper ?? false
             ruleCount = config.rules.count
             currentConfig = config
             configError = nil
@@ -93,6 +103,9 @@ final class AppModel: ObservableObject {
                           },
                           onEvent: { [weak self] e in
                               Task { @MainActor in self?.append(LogEntry(category: "event", message: e.summary)) }
+                          },
+                          onSensors: { [weak self] readings, connected in
+                              Task { @MainActor in self?.sensors = readings; self?.sensorHelperConnected = connected }
                           })
             self.hub = hub
             skippedKeys = Set(HoldStore(url: paths.skipsFile).load().keys)
@@ -103,6 +116,18 @@ final class AppModel: ObservableObject {
             configError = "\(error)"
             append(LogEntry(level: .error, category: "config", message: "\(error)"))
         }
+    }
+
+    /// A sensor's reading is old: its source is disconnected (the HomeKit helper, or the UniFi console), it is unreachable,
+    /// or nothing arrived for a while (15 minutes for HomeKit, which the helper refreshes every 5; 30 for Protect, which
+    /// HouseBridge re-reads every 5).
+    func sensorIsStale(_ group: [SensorReading], now: Date) -> Bool {
+        if group.contains(where: { !$0.reachable }) { return true }
+        let newest = group.map(\.date).max() ?? .distantPast
+        if group.first?.isProtect == true {
+            return !(statuses[.unifi]?.isHealthy ?? false) || now.timeIntervalSince(newest) > 30 * 60
+        }
+        return !sensorHelperConnected || now.timeIntervalSince(newest) > 15 * 60
     }
 
     private func refreshHomeKit() {

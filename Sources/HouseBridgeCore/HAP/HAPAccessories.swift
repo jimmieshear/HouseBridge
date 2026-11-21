@@ -7,12 +7,13 @@ struct HAPCharKey: Hashable, Sendable {
 }
 
 enum HAPValue: Equatable {
-    case bool(Bool), int(Int), string(String), data(Data), null
+    case bool(Bool), int(Int), double(Double), string(String), data(Data), null
 
     var json: Any {
         switch self {
         case .bool(let b): return b
         case .int(let i): return i
+        case .double(let d): return d
         case .string(let s): return s
         case .data(let d): return d.base64EncodedString()   // tlv8 and data formats travel as base64 text
         case .null: return NSNull()
@@ -61,7 +62,7 @@ struct HAPAccessory {
 
 /// How a Protect event input maps onto a HomeKit characteristic.
 struct HAPRoute: Equatable {
-    enum Kind { case motion, contact, leak, button }
+    enum Kind { case motion, contact, leak, button, temperature, humidity }
     var key: HAPCharKey
     var kind: Kind
 }
@@ -70,9 +71,10 @@ enum HAPLayout {
     // Service and characteristic types (short form of the HomeKit base UUID).
     static let accessoryInformation = "3E", protocolInformation = "A2"
     static let switchService = "49", outletService = "47", motionSensor = "85", contactSensor = "80", leakSensor = "83", statelessSwitch = "89"
+    static let temperatureSensor = "8A", humiditySensor = "82"
 
     /// Inputs that have their own handling; anything else a camera reports is a smart detection (person, vehicle, ...).
-    private static let knownInputs: Set<String> = ["motion", "ring", "contact", "leak", "tamper", "alarm"]
+    private static let knownInputs: Set<String> = ["motion", "ring", "contact", "leak", "tamper", "alarm", "temperature", "humidity"]
 
     struct Built {
         var accessories: [HAPAccessory] = []
@@ -133,6 +135,8 @@ enum HAPLayout {
             serviceType = leakSensor
             state = HAPCharacteristic(iid: iid, type: "70", format: "uint8", perms: ["pr", "ev"],
                                       description: "Leak Detected", initial: .int(0), extra: ["minValue": 0, "maxValue": 1])
+        case .temperature, .humidity:
+            preconditionFailure("measurement services are built by `measurement`")
         case .button:
             serviceType = statelessSwitch   // reads as null; each press is delivered as an event with value 0 (single press)
             state = HAPCharacteristic(iid: iid, type: "73", format: "uint8", perms: ["pr", "ev"],
@@ -140,6 +144,21 @@ enum HAPLayout {
                                       extra: ["minValue": 0, "maxValue": 2, "valid-values": [0]])
         }
         let service = HAPService(iid: serviceIID, type: serviceType, characteristics: [nameCharacteristic, state])
+        return (service, HAPRoute(key: HAPCharKey(aid: aid, iid: iid), kind: kind))
+    }
+
+    /// A Temperature Sensor (°C) or Humidity Sensor (%) service; the real value is set once the layout is in place.
+    private static func measurement(_ ids: inout IIDs, aid: Int, name: String, kind: HAPRoute.Kind) -> (HAPService, HAPRoute) {
+        let serviceIID = ids.take()
+        let nameCharacteristic = string(&ids, "23", "Name", name)
+        let iid = ids.take()
+        let isTemperature = kind == .temperature
+        let value = HAPCharacteristic(iid: iid, type: isTemperature ? "11" : "10", format: "float", perms: ["pr", "ev"],
+                                      description: isTemperature ? "Current Temperature" : "Current Relative Humidity",
+                                      initial: .double(0),
+                                      extra: isTemperature ? ["unit": "celsius", "minValue": -270, "maxValue": 100, "minStep": 0.1]
+                                                           : ["unit": "percentage", "minValue": 0, "maxValue": 100, "minStep": 1])
+        let service = HAPService(iid: serviceIID, type: isTemperature ? temperatureSensor : humiditySensor, characteristics: [nameCharacteristic, value])
         return (service, HAPRoute(key: HAPCharKey(aid: aid, iid: iid), kind: kind))
     }
 
@@ -182,6 +201,12 @@ enum HAPLayout {
             if provides.contains("motion") { add("motion", "Motion", .motion) }
             if provides.contains("leak") { add("leak", "Leak", .leak) }
             if provides.contains("ring") { add("ring", "Doorbell", .button) }
+            for (input, suffix, kind) in [("temperature", "Temperature", HAPRoute.Kind.temperature), ("humidity", "Humidity", .humidity)]
+            where provides.contains(input) {
+                let (service, route) = measurement(&ids, aid: aid, name: "\(device.name) \(suffix)", kind: kind)
+                services.append(service)
+                built.routes["\(device.id)|\(input)"] = route
+            }
             if smartDetections {
                 for input in device.provides.filter({ !knownInputs.contains($0) }) { add(input, label(input), .motion) }
             }

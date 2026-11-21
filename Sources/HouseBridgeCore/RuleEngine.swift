@@ -545,6 +545,17 @@ public actor RuleEngine {
         run(rule, holdKey: "manual:\(rule.name)", manual: true)
     }
 
+    /// A `buttons:` entry pressed in Home.app: runs its actions at once, exactly like "Run now" (ignores presence holds
+    /// and time windows, and marks those devices as set by hand so a restart does not undo it).
+    public func pressButton(_ name: String) {
+        guard let rule = config.rules.first(where: { $0.enabled && $0.homekitButton?.lowercased() == name.lowercased() }) else {
+            log(LogEntry(level: .warning, category: "rules", message: "Home.app button ‘\(name)’ pressed, but no such button is configured"))
+            return
+        }
+        log(LogEntry(category: "rules", message: "Home.app button ‘\(rule.homekitButton ?? name)’ pressed"))
+        runNow(rule.name)
+    }
+
     /// "Skip" from the window: this one occurrence of a scheduled rule does not run. Its devices are also marked as
     /// settled up to that time, so catch-up (wake, restart) does not apply the skipped change late. Later occurrences
     /// are unaffected. Survives a restart.

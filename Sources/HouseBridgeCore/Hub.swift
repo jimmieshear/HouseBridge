@@ -91,6 +91,8 @@ public final class Hub: @unchecked Sendable {
     private let logSink: @Sendable (LogEntry) -> Void
     private let statusSink: @Sendable (Subsystem, ConnectionStatus) -> Void
     private let eventSink: @Sendable (TriggerEvent) -> Void
+    private let sensorSink: @Sendable ([SensorReading], Bool) -> Void
+    private var sensorServer: HomeSensorServer?
     private var engine: RuleEngine?
     private var homekit: HomeKitBridge?
     private var kasaBridge: KasaBridge?
@@ -100,7 +102,8 @@ public final class Hub: @unchecked Sendable {
     public init(config: Config, paths: Paths, dryRun: Bool = false,
                 log: @escaping @Sendable (LogEntry) -> Void,
                 status: @escaping @Sendable (Subsystem, ConnectionStatus) -> Void,
-                onEvent: @escaping @Sendable (TriggerEvent) -> Void = { _ in }) {
+                onEvent: @escaping @Sendable (TriggerEvent) -> Void = { _ in },
+                onSensors: @escaping @Sendable ([SensorReading], Bool) -> Void = { _, _ in }) {
         self.config = config
         self.paths = paths
         self.dryRun = dryRun
@@ -115,6 +118,7 @@ public final class Hub: @unchecked Sendable {
             fileLog.write(category: subsystem.rawValue, message: "status: \(st.label)")
             status(subsystem, st)
         }
+        self.sensorSink = { readings, helperConnected in guard active.isOn else { return }; onSensors(readings, helperConnected) }
         self.eventSink = { event in
             guard active.isOn else { return }
             fileLog.write(category: "event", message: event.summary)
@@ -225,13 +229,26 @@ public final class Hub: @unchecked Sendable {
             status(.kasa, .notConfigured)
         }
 
+        let buttonNames = Set(config.homekitButtons.map { $0.lowercased() })
         if let hk = config.homekit {
             if dryRun {
                 status(.homekit, .notConfigured)
                 log(LogEntry(category: "homekit", message: "HomeKit bridge is not started in dry-run mode"))
             } else {
                 let bridge = HomeKitBridge(config: hk, paths: paths, switches: config.homekitSwitches,
-                                           onSwitchWrite: { name, on in Task { await engine.setSwitch(name, on: on) } },
+                                           onSwitchWrite: { name, on in
+                                               guard !buttonNames.contains(name.lowercased()) else {
+                                                   // A button: run it when switched on, and let it spring back a second later.
+                                                   guard on else { return }
+                                                   Task {
+                                                       await engine.pressButton(name)
+                                                       try? await Task.sleep(for: .seconds(1))
+                                                       relay.set(name, false)
+                                                   }
+                                                   return
+                                               }
+                                               Task { await engine.setSwitch(name, on: on) }
+                                           },
                                            outlets: config.homekitOutlets,
                                            onOutletWrite: { [weak router] name, on in
                                                Task {
@@ -265,6 +282,54 @@ public final class Hub: @unchecked Sendable {
             tasks.append(Task { await kasa.monitor() })
         }
 
+        // Smoke/CO alarms and readings. HomeKit accessories come from the HouseBridgeHomeKit helper (HomeKit is not
+        // reachable from here directly); UniFi Protect sensors are read straight from the console, below.
+        var sensorStore: SensorStore?
+        let helperConnected = LockedBool()   // is the HomeKit helper connected (true when none is needed)
+        if let sensors = config.homeSensors {
+            let store = SensorStore(config: sensors)
+            sensorStore = store
+            let sink = sensorSink
+            helperConnected.value = !sensors.needsHelper
+            if !sensors.needsHelper {
+                status(.sensors, .connected("reading UniFi Protect sensors directly"))
+            } else if dryRun {
+                status(.sensors, .notConfigured)   // a rehearsal must not take the socket from the running app
+            } else {
+                let server = HomeSensorServer(path: paths.sensorsSocket.path, onLine: { line in
+                    let result = store.ingest(line: line)
+                    for event in result.events {
+                        log(LogEntry(level: .warning, category: "sensors", message: "\(event.summary)"))
+                        engine.submit(event)
+                    }
+                    if result.changed || result.hello { sink(store.readings, true) }
+                }, onClients: { count in
+                    helperConnected.value = count > 0
+                    if count > 0 {
+                        status(.sensors, .connected("helper connected"))
+                        sink(store.readings, true)
+                    } else {
+                        status(.sensors, .disconnected("HouseBridgeHomeKit helper is not running (readings are stale, alarms are not being watched)"))
+                        sink(store.readings, false)
+                    }
+                })
+                do {
+                    try server.start()
+                    sensorServer = server
+                    status(.sensors, .disconnected("waiting for the HouseBridgeHomeKit helper"))
+                    let launcher = HomeKitHelperLauncher(log: log, helperLog: paths.logsDirectory.appendingPathComponent("homekit-helper.log"))
+                    tasks.append(Task { await launcher.keepRunning(isConnected: { helperConnected.value }) })
+                } catch {
+                    status(.sensors, .needsSetup("\(error)"))
+                    log(LogEntry(level: .error, category: "sensors", message: "cannot listen for the HomeKit helper: \(error)"))
+                }
+            }
+        } else {
+            status(.sensors, .notConfigured)
+        }
+        let readingsStore = sensorStore
+        let sensorUpdates = sensorSink
+
         if let unifi = config.unifi {
             if unifi.resolvedPassword() == nil {
                 status(.unifi, .needsSetup("no password: run housebridgectl set-unifi-password"))
@@ -272,6 +337,15 @@ public final class Hub: @unchecked Sendable {
             } else {
                 let client = ProtectClient(config: unifi, hosts: hosts, emit: { engine.submit($0); homekit?.handle($0) },
                                            onInventory: { homekit?.updateInventory($0) },
+                                           onReadings: { readings in
+                                               // Home.app gets every Protect sensor's temperature and humidity; the window only
+                                               // those listed under home_sensors: unifi:.
+                                               homekit?.updateReadings(readings)
+                                               guard let store = readingsStore else { return }
+                                               var changed = false
+                                               for reading in readings where store.ingest(protect: reading).changed { changed = true }
+                                               if changed { sensorUpdates(store.readings, helperConnected.value) }
+                                           },
                                            status: { status(.unifi, $0) }, log: log)
                 snapshotRelay.attach(client)
                 tasks.append(Task { await client.run() })
@@ -303,5 +377,7 @@ public final class Hub: @unchecked Sendable {
         homekit = nil
         kasaBridge?.stop()
         kasaBridge = nil
+        sensorServer?.stop()
+        sensorServer = nil
     }
 }

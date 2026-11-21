@@ -19,6 +19,8 @@ public struct ProtectInventory: Sendable {
         public var state: [String: Bool] = [:]
         /// Cameras only.
         public var channels: [Channel] = []
+        /// Sensors only: the readings in `stats` at the time of the bootstrap (temperature °C, humidity %, light lux).
+        public var measurements: [String: Double] = [:]
     }
     public var items: [Item] = []
 }
@@ -29,18 +31,21 @@ public final class ProtectClient: @unchecked Sendable {
     private let hosts: KnownHosts
     private let emit: @Sendable (TriggerEvent) -> Void
     private let onInventory: @Sendable (ProtectInventory) -> Void
+    private let onReadings: @Sendable ([SensorReading]) -> Void
     private let status: @Sendable (ConnectionStatus) -> Void
     private let log: @Sendable (LogEntry) -> Void
 
     public init(config: UnifiConfig, hosts: KnownHosts,
                 emit: @escaping @Sendable (TriggerEvent) -> Void = { _ in },
                 onInventory: @escaping @Sendable (ProtectInventory) -> Void = { _ in },
+                onReadings: @escaping @Sendable ([SensorReading]) -> Void = { _ in },
                 status: @escaping @Sendable (ConnectionStatus) -> Void = { _ in },
                 log: @escaping @Sendable (LogEntry) -> Void = { _ in }) {
         self.config = config
         self.hosts = hosts
         self.emit = emit
         self.onInventory = onInventory
+        self.onReadings = onReadings
         self.status = status
         self.log = log
     }
@@ -108,6 +113,7 @@ public final class ProtectClient: @unchecked Sendable {
                     default: item.provides = ["contact", "motion", "leak"]
                     }
                     item.provides += ["tamper", "alarm"]
+                    item.measurements = ProtectStats.measurements(d["stats"])
                     item.state["contact"] = d["isOpened"] as? Bool ?? false
                     item.state["motion"] = d["isMotionDetected"] as? Bool ?? false
                     item.state["leak"] = (d["leakDetectedAt"] != nil && !(d["leakDetectedAt"] is NSNull)) || (d["externalLeakDetectedAt"] != nil && !(d["externalLeakDetectedAt"] is NSNull))
@@ -228,6 +234,15 @@ public final class ProtectClient: @unchecked Sendable {
         }
     }
 
+    private func emitReadings(_ items: [ProtectInventory.Item], now: Date = Date()) {
+        let readings = items.filter { $0.kind == "sensor" }.flatMap { item in
+            item.measurements.sorted { $0.key < $1.key }.map {
+                SensorReading(accessory: "unifi:\(item.id)", home: "UniFi Protect", name: item.name, room: "", kind: $0.key, value: $0.value, date: now)
+            }
+        }
+        if !readings.isEmpty { onReadings(readings) }
+    }
+
     private func session(onConnected: () -> Void) async throws {
         let session = makeSession()
         defer { session.invalidateAndCancel() }
@@ -236,6 +251,17 @@ public final class ProtectClient: @unchecked Sendable {
         let interpreter = ProtectInterpreter()
         for item in boot.items { interpreter.devices[item.id] = .init(id: item.id, name: item.name, kind: item.kind) }
         onInventory(ProtectInventory(items: boot.items))
+        emitReadings(boot.items)
+        // Protect only pushes a sensor's stats when they change, so re-read the bootstrap now and then; that also keeps
+        // the window's "updated" time honest for a steady temperature.
+        let refresher = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(300))
+                if Task.isCancelled { return }
+                if let fresh = try? await self?.authenticatedBootstrap(session) { self?.emitReadings(fresh.items) }
+            }
+        }
+        defer { refresher.cancel() }
 
         var components = URLComponents()
         components.scheme = "wss"
@@ -263,6 +289,8 @@ public final class ProtectClient: @unchecked Sendable {
             do {
                 let update = try ProtectPacket.decode(data)
                 interpreter.interpret(update).forEach(emit)
+                let readings = interpreter.readings(update)
+                if !readings.isEmpty { onReadings(readings) }
             } catch {
                 log(LogEntry(level: .warning, category: "unifi", message: "could not decode update: \(describeError(error))"))
             }
